@@ -59,6 +59,10 @@ export const api = {
   deleteProxy: (id) => call('proxy-delete', { id }),
   checkProxy: (payload = {}) => call('proxy-check', payload),
 
+  extensions: (params = {}) => call('extension-list', clean({ page: 1, limit: 10, ...params })),
+  uploadExtension: (payload) => call('extension-upload', payload),
+  deleteExtension: (id) => call('extension-delete', { id }),
+
   health: async () => {
     const res = await fetch('/health')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)

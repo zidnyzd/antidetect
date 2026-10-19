@@ -97,6 +97,8 @@ const activeTab = ref('account')
 const busy = ref(false)
 const savedProxies = ref([])
 const savedProxyId = ref(null)
+const extensionOptions = ref([])
+const extensionsLoading = ref(false)
 const proxyCheck = reactive({ loading: false, ok: null, text: '' })
 const errors = reactive({ name: '', group_id: '', proxy_ip: '', proxy_port: '', site_url: '' })
 
@@ -121,6 +123,7 @@ function emptyForm() {
     device_memory: 8,
     timezone: 'Asia/Jakarta',
     language: 'id-ID',
+    extension_ids: [],
   }
 }
 
@@ -172,6 +175,10 @@ function fillFromProfile(profile) {
   form.device_memory = MEMORY.includes(Number(fingerprint.device_memory)) ? Number(fingerprint.device_memory) : 8
   form.timezone = fingerprint.timezone || 'Asia/Jakarta'
   form.language = fingerprint.language || 'id-ID'
+  const extensionIds = (profile.preference_config || {}).extension_ids
+  form.extension_ids = Array.isArray(extensionIds)
+    ? extensionIds.map((id) => Number(id)).filter((id) => Number.isInteger(id))
+    : []
 }
 
 function clearErrors() {
@@ -204,12 +211,26 @@ async function loadSavedProxies() {
   }
 }
 
+async function loadExtensions() {
+  extensionsLoading.value = true
+  try {
+    const result = await api.extensions({ page: 1, limit: 200 })
+    extensionOptions.value = result.data || []
+  } catch (error) {
+    extensionOptions.value = []
+    ElMessage.error(`Gagal memuat extension: ${error.message}`)
+  } finally {
+    extensionsLoading.value = false
+  }
+}
+
 watch(
   () => props.modelValue,
   (open) => {
     if (open) {
       resetForm()
       loadSavedProxies()
+      loadExtensions()
     }
   }
 )
@@ -284,6 +305,12 @@ function proxyPayload() {
   }
 }
 
+function preferencePayload() {
+  const saved = props.profile?.preference_config
+  const base = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}
+  return { ...base, extension_ids: [...form.extension_ids] }
+}
+
 function formPayload(tagIds = form.tag_id) {
   const url = form.site_url.trim()
   return {
@@ -296,7 +323,7 @@ function formPayload(tagIds = form.tag_id) {
     site_url: url || null,
     proxy_config: proxyPayload(),
     fingerprint_config: fingerprintPayload(),
-    preference_config: {},
+    preference_config: preferencePayload(),
   }
 }
 
@@ -615,6 +642,26 @@ async function testProxy() {
           </el-form-item>
           <p class="form-hint">Layar dan device scale factor belum didukung engine 150.</p>
         </el-form>
+      </el-tab-pane>
+
+      <el-tab-pane label="Extension" name="extension">
+        <div v-loading="extensionsLoading" element-loading-text="Memuat extension..." class="extension-picker">
+          <template v-if="extensionOptions.length">
+            <el-checkbox-group v-model="form.extension_ids" class="extension-list">
+              <el-checkbox
+                v-for="item in extensionOptions"
+                :key="item.id"
+                :value="item.id"
+                class="extension-item"
+              >
+                <span class="extension-name">{{ item.title }}</span>
+                <span class="extension-version">{{ item.version ? `v${item.version}` : 'tanpa versi' }}</span>
+              </el-checkbox>
+            </el-checkbox-group>
+            <p class="form-hint">Extension terpilih dimuat saat profil dibuka. Kosongkan centang untuk menonaktifkan.</p>
+          </template>
+          <p v-else-if="!extensionsLoading" class="form-hint">Unggah extension di halaman Extension.</p>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="Preferensi" name="preference">

@@ -50,6 +50,14 @@ CREATE TABLE IF NOT EXISTS proxies (
     note TEXT,
     tag TEXT
 );
+CREATE TABLE IF NOT EXISTS extensions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT UNIQUE,
+    title TEXT,
+    version TEXT,
+    path TEXT,
+    created_at TEXT
+);
 """
 
 

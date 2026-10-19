@@ -46,7 +46,8 @@ venv/bin/python scripts/selftest.py
   kosongkan keranjang
 - [x] operasi massal (buka/tutup, ubah grup, catatan, proxy, platform),
   cek proxy dengan IP dan latensi, pilih proxy tersimpan, atur jendela
-- [ ] kelola extension lokal dan pemilihan per profil
+- [x] kelola extension lokal (unggah zip/crx, daftar, hapus dengan proteksi
+  pemakaian) dan pemilihan extension per profil
 - [ ] fingerprint lanjutan dan pilih versi kernel
 
 ## Pemetaan fingerprint_config ke flag engine
@@ -157,6 +158,10 @@ Centang beberapa profil untuk membuka/menutup, memindahkan grup, mengubah
 catatan/proxy/platform, atau menghapus sekaligus. Tombol Atur Jendela menata
 jendela profil yang terbuka. Halaman Proxy punya tombol Tes yang menampilkan IP
 keluar dan latensi; dialog profil bisa mengisi konfigurasi dari proxy tersimpan.
+
+Halaman Extension menyimpan extension lokal dari unggahan zip/crx, menampilkan
+versi dan ukurannya, serta menolak hapus selama masih dipakai profil. Tab
+Extension di dialog profil memilih extension yang dimuat saat profil dibuka.
 
 ```bash
 cd ui

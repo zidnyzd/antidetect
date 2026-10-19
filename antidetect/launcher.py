@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote
 
+from . import extensions
 from .paths import DATA_DIR
 
 ENGINE_DIR = Path(
@@ -165,6 +166,12 @@ def build_args(profile, port, app_args=None, proxy_arg=None):
         args.append(f"--accept-lang={fp['language']}")
     if fp.get("timezone"):
         args.append(f"--timezone={fp['timezone']}")
+
+    extension_ids = (profile.get("preference_config") or {}).get("extension_ids")
+    if extension_ids and not os.environ.get("ANTIDETECT_NO_EXTENSIONS"):
+        paths = extensions.extension_paths(extension_ids)
+        if paths:
+            args.append("--load-extension=" + ",".join(str(path) for path in paths))
 
     if proxy_arg:
         args.append(f"--proxy-server={proxy_arg}")

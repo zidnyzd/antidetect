@@ -3,7 +3,7 @@ import json
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import cookies, launcher, proxycheck, store
+from . import cookies, extensions, launcher, proxycheck, store
 
 ACTIONS = {}
 
@@ -553,6 +553,39 @@ def proxy_check(params):
 @action("traffic-package-list")
 def traffic_package_list(params):
     return {"total": 0, "data": []}
+
+
+@action("extension-list")
+def extension_list(params):
+    try:
+        return extensions.list_extensions(
+            params.get("page") or 1,
+            params.get("limit") or 10,
+            str(params.get("name") or "").strip() or None,
+        )
+    except (TypeError, ValueError):
+        raise ApiError(1200, "page dan limit harus berupa bilangan bulat")
+
+
+@action("extension-upload")
+def extension_upload(params):
+    filename = params.get("filename") or params.get("file_name")
+    content = params.get("content") or params.get("content_base64")
+    try:
+        return extensions.upload(filename, content)
+    except extensions.ExtensionError as error:
+        raise ApiError(1201, str(error))
+
+
+@action("extension-delete")
+def extension_delete(params):
+    extension_id = params.get("id", params.get("extension_id"))
+    if extension_id in (None, ""):
+        raise ApiError(1200, "id extension wajib diisi")
+    try:
+        return extensions.delete_extension(extension_id)
+    except extensions.ExtensionError as error:
+        raise ApiError(1202, str(error))
 
 
 @action("gateway-list")

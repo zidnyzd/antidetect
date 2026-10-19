@@ -396,21 +396,24 @@ button {
 }
 
 .profiles-page,
-.proxies-page {
+.proxies-page,
+.extensions-page {
   min-height: calc(100vh - var(--ix-topbar-height) - 40px);
   display: flex;
   flex-direction: column;
 }
 
 .profiles-page > .surface,
-.proxies-page > .surface {
+.proxies-page > .surface,
+.extensions-page > .surface {
   flex: 1;
   display: flex;
   flex-direction: column;
 }
 
 .profiles-page .table-footer,
-.proxies-page .table-footer {
+.proxies-page .table-footer,
+.extensions-page .table-footer {
   margin-top: auto;
 }
 
@@ -1122,6 +1125,52 @@ button {
 .color-swatch.active {
   border-color: var(--ix-text);
   box-shadow: 0 0 0 2px #fff inset;
+}
+
+.extension-file-input {
+  display: none;
+}
+
+.extension-picker {
+  min-height: 260px;
+}
+
+.extension-list {
+  display: flex;
+  flex-direction: column;
+  max-width: 560px;
+}
+
+.extension-item.el-checkbox {
+  height: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ix-border-light);
+}
+
+.extension-item.el-checkbox:first-child {
+  border-top: 1px solid var(--ix-border-light);
+}
+
+.extension-item .el-checkbox__label {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.extension-name {
+  font-weight: 500;
+  color: var(--ix-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extension-version {
+  font-size: 12px;
+  color: var(--ix-muted);
 }
 
 /* Settings */
