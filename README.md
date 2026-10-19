@@ -8,7 +8,8 @@ akun, tanpa langganan.
   `~/.local/share/antidetect/squashfs-root` (`engine.AppImage` disimpan di sebelahnya).
 - API: `http://127.0.0.1:53200/api/v2/`. SDK Python resmi ixBrowser
   (`ixbrowser-local-api`) bisa dipakai apa adanya sebagai klien.
-- UI: belum ada (roadmap).
+- UI: Vue 3 + Element Plus di `ui/`, layout mengikuti ixBrowser 2.10 (sidebar
+  gelap, topbar putih, tabel profil, dialog 4 tab). Dev server `127.0.0.1:5180`.
 
 ## Pakai
 
@@ -36,7 +37,9 @@ venv/bin/python scripts/selftest.py
 - [x] proxy dengan autentikasi user/password via jembatan gost (http/https/socks5)
 - [x] fingerprint: platform, system_version, cores, memory, timezone, language, brand
 - [x] selenium/chromedriver attach (kontrak `webdriver` + `debugging_address`)
-- [ ] import/export cookie, extensions, GUI
+- [x] UI: daftar profil, buat/edit 4 tab, buka/tutup, duplikat/hapus, filter,
+  pagination, halaman proxy dan pengaturan
+- [ ] import/export cookie, extensions
 
 ## Pemetaan fingerprint_config ke flag engine
 
@@ -125,18 +128,24 @@ Restart=on-failure
 WantedBy=default.target
 ```
 
-## UI (prototype)
+## UI
 
-Frontend prototype di `ui/`: Vue 3 + Element Plus + Vite, berbicara ke API lokal yang sama
-(dev server mem-proxy `/api` dan `/health` ke `127.0.0.1:53200`).
+Frontend di `ui/`: Vue 3 + Element Plus + Vite. Layout mengikuti ixBrowser
+2.10.18: sidebar gelap 210 px, topbar putih 50 px, kanvas terang, tabel profil
+dengan toolbar dua baris, dan dialog Buat/Edit Profil 4 tab (Akun Platform,
+Konfigurasi Proxy, Fingerprint, Preferensi). Halaman Proxy dan Pengaturan juga
+aktif.
 
 ```bash
 cd ui
 npm install
-npm run dev        # http://127.0.0.1:5180
+npm run dev        # http://127.0.0.1:5180, proxy /api dan /health ke :53200
+npm run build      # hasil produksi ke ui/dist
 ```
 
-Butuh Node.js 18+. Shell desktop (Tauri/Electron) menyusul setelah arah UI disetujui.
+Butuh Node.js 18+. Alur yang sudah diuji lewat UI: buat, edit, duplikat, hapus,
+buka/tutup profil, filter status dan grup, pencarian, pagination, serta CRUD
+proxy. Shell desktop (Tauri/Electron) menyusul.
 
 ## Lisensi
 

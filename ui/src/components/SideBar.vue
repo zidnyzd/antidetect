@@ -1,21 +1,76 @@
 <script setup>
+import { useRoute } from 'vue-router'
 import { Connection, Monitor, Setting } from '@element-plus/icons-vue'
+
+defineProps({ collapsed: Boolean })
+
+const route = useRoute()
+
+const browserItems = [
+  { path: '/', label: 'Daftar Profil', icon: Monitor },
+  { path: '/proxies', label: 'Proxy', icon: Connection },
+]
+const systemItems = [{ path: '/settings', label: 'Pengaturan', icon: Setting }]
+
+function isActive(path) {
+  return route.path === path
+}
 </script>
 
 <template>
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="logo">A</div>
-      <div class="brand-text">
-        <strong>Antidetect</strong>
-        <small>prototype v0.1</small>
-      </div>
+  <aside :class="['ix-sidebar', { collapsed }]">
+    <div class="side-logo">
+      <div class="brand-mark">A</div>
+      <span v-if="!collapsed" class="brand-word">Antidetect</span>
     </div>
-    <nav>
-      <router-link to="/" class="nav-item"><el-icon><Monitor /></el-icon> Profil</router-link>
-      <router-link to="/proxies" class="nav-item"><el-icon><Connection /></el-icon> Proxy</router-link>
-      <router-link to="/settings" class="nav-item"><el-icon><Setting /></el-icon> Pengaturan</router-link>
+
+    <nav class="side-nav">
+      <div v-if="!collapsed" class="side-section">Browser Profile</div>
+      <div v-else class="side-divider"></div>
+
+      <el-tooltip
+        v-for="item in browserItems"
+        :key="item.path"
+        :content="item.label"
+        placement="right"
+        :disabled="!collapsed"
+        :show-after="200"
+      >
+        <router-link :to="item.path" :class="['side-item', { active: isActive(item.path) }]">
+          <el-icon class="side-icon"><component :is="item.icon" /></el-icon>
+          <span v-if="!collapsed" class="side-label">{{ item.label }}</span>
+        </router-link>
+      </el-tooltip>
+
+      <div v-if="!collapsed" class="side-section">Sistem</div>
+      <div v-else class="side-divider"></div>
+
+      <el-tooltip
+        v-for="item in systemItems"
+        :key="item.path"
+        :content="item.label"
+        placement="right"
+        :disabled="!collapsed"
+        :show-after="200"
+      >
+        <router-link :to="item.path" :class="['side-item', { active: isActive(item.path) }]">
+          <el-icon class="side-icon"><component :is="item.icon" /></el-icon>
+          <span v-if="!collapsed" class="side-label">{{ item.label }}</span>
+        </router-link>
+      </el-tooltip>
     </nav>
-    <div class="sidebar-foot">mirip ixBrowser · Linux</div>
+
+    <el-tooltip content="fingerprint-chromium 150, siap" placement="right" :disabled="!collapsed" :show-after="200">
+      <div :class="['side-engine', { compact: collapsed }]">
+        <template v-if="!collapsed">
+          <div class="engine-label">Engine</div>
+          <div class="engine-name">fingerprint-chromium 150</div>
+        </template>
+        <div class="engine-state">
+          <span class="engine-dot"></span>
+          <span v-if="!collapsed">siap</span>
+        </div>
+      </div>
+    </el-tooltip>
   </aside>
 </template>

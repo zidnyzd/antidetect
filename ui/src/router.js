@@ -6,8 +6,9 @@ import Settings from './views/Settings.vue'
 export default createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', component: Profiles },
-    { path: '/proxies', component: Proxies },
-    { path: '/settings', component: Settings },
+    { path: '/', name: 'profiles', component: Profiles, meta: { crumb: 'Daftar Profil' } },
+    { path: '/proxies', name: 'proxies', component: Proxies, meta: { crumb: 'Proxy' } },
+    { path: '/settings', name: 'settings', component: Settings, meta: { crumb: 'Pengaturan' } },
+    { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })
