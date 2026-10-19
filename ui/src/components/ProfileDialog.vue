@@ -13,18 +13,81 @@ const emit = defineEmits(['update:modelValue', 'saved', 'tags-changed'])
 
 const COLORS = ['#2f6fed', '#16a34a', '#f59e0b', '#d92d20', '#a855f7', '#14b8a6', '#e879f9', '#64748b']
 const TIMEZONES = [
+  'UTC',
   'Asia/Jakarta',
+  'Asia/Pontianak',
   'Asia/Makassar',
   'Asia/Jayapura',
   'Asia/Singapore',
+  'Asia/Kuala_Lumpur',
+  'Asia/Bangkok',
+  'Asia/Ho_Chi_Minh',
+  'Asia/Manila',
   'Asia/Shanghai',
-  'America/New_York',
-  'America/Los_Angeles',
+  'Asia/Hong_Kong',
+  'Asia/Taipei',
+  'Asia/Tokyo',
+  'Asia/Seoul',
+  'Asia/Kolkata',
+  'Asia/Karachi',
+  'Asia/Dubai',
+  'Asia/Riyadh',
+  'Asia/Tehran',
+  'Australia/Perth',
+  'Australia/Sydney',
+  'Pacific/Auckland',
+  'Pacific/Honolulu',
   'Europe/London',
+  'Europe/Dublin',
+  'Europe/Paris',
   'Europe/Berlin',
-  'UTC',
+  'Europe/Amsterdam',
+  'Europe/Madrid',
+  'Europe/Rome',
+  'Europe/Warsaw',
+  'Europe/Istanbul',
+  'Europe/Moscow',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Toronto',
+  'America/Mexico_City',
+  'America/Sao_Paulo',
+  'Africa/Cairo',
+  'Africa/Lagos',
+  'Africa/Johannesburg',
 ]
-const LANGUAGES = ['id-ID', 'en-US', 'en-GB', 'zh-CN', 'ja-JP', 'ko-KR', 'es-ES']
+const LANGUAGES = [
+  'id-ID',
+  'en-US',
+  'en-GB',
+  'en-AU',
+  'en-CA',
+  'zh-CN',
+  'zh-TW',
+  'ja-JP',
+  'ko-KR',
+  'th-TH',
+  'vi-VN',
+  'ms-MY',
+  'fil-PH',
+  'hi-IN',
+  'es-ES',
+  'es-MX',
+  'pt-BR',
+  'pt-PT',
+  'fr-FR',
+  'de-DE',
+  'it-IT',
+  'nl-NL',
+  'pl-PL',
+  'ru-RU',
+  'tr-TR',
+  'ar-SA',
+  'he-IL',
+  'fa-IR',
+]
 const CPU_CORES = [2, 4, 6, 8, 12, 16]
 const MEMORY = [2, 4, 8]
 const WINDOWS_VERSIONS = ['11', '10', '8.1', '7']
@@ -107,8 +170,8 @@ function fillFromProfile(profile) {
     ? Number(fingerprint.hardware_concurrency)
     : 8
   form.device_memory = MEMORY.includes(Number(fingerprint.device_memory)) ? Number(fingerprint.device_memory) : 8
-  form.timezone = TIMEZONES.includes(fingerprint.timezone) ? fingerprint.timezone : 'Asia/Jakarta'
-  form.language = LANGUAGES.includes(fingerprint.language) ? fingerprint.language : 'id-ID'
+  form.timezone = fingerprint.timezone || 'Asia/Jakarta'
+  form.language = fingerprint.language || 'id-ID'
 }
 
 function clearErrors() {
@@ -526,13 +589,27 @@ async function testProxy() {
               <el-option v-for="memory in MEMORY" :key="memory" :label="memory" :value="memory" />
             </el-select>
           </el-form-item>
-          <el-form-item label="Timezone">
-            <el-select v-model="form.timezone" filterable class="field-260">
+          <el-form-item label="Zona Waktu">
+            <el-select
+              v-model="form.timezone"
+              filterable
+              allow-create
+              default-first-option
+              placeholder="Cari atau tulis zona waktu"
+              class="field-260"
+            >
               <el-option v-for="zone in TIMEZONES" :key="zone" :label="zone" :value="zone" />
             </el-select>
           </el-form-item>
           <el-form-item label="Bahasa">
-            <el-select v-model="form.language" class="field-180">
+            <el-select
+              v-model="form.language"
+              filterable
+              allow-create
+              default-first-option
+              placeholder="Cari atau tulis locale"
+              class="field-180"
+            >
               <el-option v-for="lang in LANGUAGES" :key="lang" :label="lang" :value="lang" />
             </el-select>
           </el-form-item>
