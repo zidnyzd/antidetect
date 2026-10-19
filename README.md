@@ -51,6 +51,8 @@ venv/bin/python scripts/selftest.py
 - [x] info engine/kernel di Pengaturan, acak seed, kolom GPU Vendor/Renderer
   dan opsi tampilkan GPU host (binary 150 belum menerapkan flag GPU)
 - [x] ekspor/impor profil (JSON), penampil bookmark dan password tersimpan
+- [x] filter tag, pilih kolom tersimpan, preset platform akun
+- [x] halaman Dasbor dan halaman API dengan contoh curl dan Selenium
 - [ ] pemilihan versi kernel dan penegakan fingerprint GPU di engine
 
 ## Pemetaan fingerprint_config ke flag engine
@@ -177,6 +179,14 @@ Profil bisa diekspor ke JSON dan diimpor kembali (nama diberi akhiran
 Bookmark dan Password Tersimpan; password didekripsi lokal dan hanya
 ditampilkan saat tombol mata ditekan.
 
+Dasbor jadi halaman pertama berisi ringkasan profil, grup, extension, proxy,
+dan profil terbaru. Halaman API menampilkan base URL lokal, status health,
+contoh payload dan curl per aksi, cuplikan Selenium, serta tombol salin. Daftar
+profil punya filter tag di samping filter grup dan status, plus pemilih kolom
+yang tersimpan di localStorage. Dialog profil menyediakan preset platform akun
+(Facebook, TikTok, Instagram, Shopee, Tokopedia, Google, Lazada, Custom) yang
+mengisi `site_id` dan URL awal yang tetap bisa diedit.
+
 ```bash
 cd ui
 npm install
@@ -188,8 +198,9 @@ Butuh Node.js 18+. Alur yang sudah diuji lewat UI: buat, edit, duplikat, hapus
 ke keranjang, buka/tutup profil dengan timestamp terakhir dibuka, tag per
 profil, kelola grup, filter status dan grup, pencarian, pagination, cookie
 import/export, aksi cache, pemulihan keranjang sampah, operasi massal, cek
-proxy, pilih proxy tersimpan, atur jendela, serta CRUD proxy. Shell desktop
-(Tauri/Electron) menyusul.
+proxy, pilih proxy tersimpan, atur jendela, filter tag, pilih kolom,
+ekspor/impor profil, bookmark, password tersimpan, preset platform, dasbor,
+halaman API, serta CRUD proxy. Shell desktop (Tauri/Electron) menyusul.
 
 ## Lisensi
 

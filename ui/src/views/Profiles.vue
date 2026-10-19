@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Brush, CopyDocument, Delete, Download, Edit, Files, FolderOpened, Grid, Key, Lock, MoreFilled, Plus, Refresh, Search, Star, Upload } from '@element-plus/icons-vue'
+import { ArrowDown, Brush, CopyDocument, Delete, Download, Edit, Files, FolderOpened, Grid, Key, Lock, Menu, MoreFilled, Plus, Refresh, Search, Star, Upload } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
 import ProfileDialog from '../components/ProfileDialog.vue'
@@ -11,6 +11,34 @@ import PasswordDialog from '../components/PasswordDialog.vue'
 import GroupManager from '../components/GroupManager.vue'
 
 const POOL_LIMIT = 1000
+const COLUMN_STORAGE_KEY = 'antidetect.profiles.columns'
+const COLUMN_OPTIONS = [
+  { key: 'name', label: 'Nama' },
+  { key: 'group', label: 'Grup' },
+  { key: 'tag', label: 'Tag' },
+  { key: 'platform', label: 'Platform' },
+  { key: 'proxy', label: 'Proxy' },
+  { key: 'status', label: 'Status' },
+  { key: 'created', label: 'Dibuat' },
+  { key: 'last_open', label: 'Terakhir Dibuka' },
+  { key: 'note', label: 'Catatan' },
+  { key: 'process', label: 'Waktu Proses' },
+]
+const DEFAULT_COLUMNS = ['name', 'group', 'tag', 'platform', 'proxy', 'status', 'created', 'last_open']
+
+function orderColumns(keys) {
+  return COLUMN_OPTIONS.map((column) => column.key).filter((key) => keys.includes(key))
+}
+
+function loadVisibleColumns() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLUMN_STORAGE_KEY) || '')
+    if (!Array.isArray(saved)) return [...DEFAULT_COLUMNS]
+    return orderColumns(saved)
+  } catch {
+    return [...DEFAULT_COLUMNS]
+  }
+}
 
 const rows = ref([])
 const pool = ref([])
@@ -18,12 +46,16 @@ const total = ref(0)
 const groups = ref([])
 const tags = ref([])
 const opened = ref(new Set())
+const openedSince = ref({})
+const nowTick = ref(Date.now())
+const visibleColumns = ref(loadVisibleColumns())
 const loading = ref(false)
 const selected = ref([])
 const page = ref(1)
 const limit = ref(10)
 const search = ref('')
 const groupFilter = ref('all')
+const tagFilter = ref('all')
 const statusFilter = ref('all')
 const busy = ref({})
 const bulkBusy = ref(false)
@@ -101,6 +133,7 @@ const DATA_ACTIONS = {
 
 let searchTimer = null
 let pollTimer = null
+let clockTimer = null
 
 const groupMap = computed(() => new Map(groups.value.map((group) => [group.id, group.title])))
 const tagMap = computed(() => new Map(tags.value.map((tag) => [tag.id, tag.title])))
@@ -125,7 +158,11 @@ const visibleRows = computed(() => {
 const displayTotal = computed(() => (statusFilter.value === 'all' ? total.value : filteredPool.value.length))
 
 const hasFilter = computed(
-  () => !!search.value.trim() || groupFilter.value !== 'all' || statusFilter.value !== 'all'
+  () =>
+    !!search.value.trim() ||
+    groupFilter.value !== 'all' ||
+    tagFilter.value !== 'all' ||
+    statusFilter.value !== 'all'
 )
 
 async function loadProfiles() {
@@ -137,6 +174,7 @@ async function loadProfiles() {
       limit: all ? limit.value : POOL_LIMIT,
       name: search.value.trim() || undefined,
       group_id: groupFilter.value === 'all' ? undefined : groupFilter.value,
+      tab_id: tagFilter.value === 'all' ? undefined : tagFilter.value,
     })
     if (all) {
       rows.value = result.data || []
@@ -173,6 +211,11 @@ async function pollOpened() {
   try {
     const list = await api.openedList()
     opened.value = new Set((list || []).map((item) => item.profile_id))
+    const since = {}
+    for (const item of list || []) {
+      if (item.started_at) since[item.profile_id] = item.started_at
+    }
+    openedSince.value = since
   } catch {
     // indikator API di topbar yang memberi tahu saat server tidak merespons
   }
@@ -189,6 +232,23 @@ function clearSelection() {
 
 function onSelectionChange(value) {
   selected.value = value
+}
+
+function isColumnVisible(key) {
+  return visibleColumns.value.includes(key)
+}
+
+function toggleColumn(key) {
+  const next = visibleColumns.value.includes(key)
+    ? visibleColumns.value.filter((item) => item !== key)
+    : [...visibleColumns.value, key]
+  visibleColumns.value = orderColumns(next)
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(visibleColumns.value))
+}
+
+function showAllColumns() {
+  visibleColumns.value = [...DEFAULT_COLUMNS]
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(DEFAULT_COLUMNS))
 }
 
 function onPageChange(value) {
@@ -213,6 +273,12 @@ watch(search, () => {
 })
 
 watch(groupFilter, () => {
+  page.value = 1
+  clearSelection()
+  loadProfiles()
+})
+
+watch(tagFilter, () => {
   page.value = 1
   clearSelection()
   loadProfiles()
@@ -762,18 +828,46 @@ function createdLabel(value) {
   return timestampLabel(value) || '-'
 }
 
+function dateLabel(value) {
+  return timestampLabel(value).split(' ')[0] || ''
+}
+
+function timeLabel(value) {
+  return timestampLabel(value).split(' ')[1] || ''
+}
+
 function lastOpenedLabel(profile) {
   return timestampLabel(profile.last_open_time) || 'Belum dibuka'
+}
+
+function processStart(profile) {
+  const raw = openedSince.value[profile.profile_id]
+  if (!raw) return 0
+  const stamp = new Date(String(raw).replace(' ', 'T')).getTime()
+  return Number.isNaN(stamp) ? 0 : stamp
+}
+
+function processTimeLabel(profile) {
+  if (!isOpen(profile)) return '-'
+  const start = processStart(profile)
+  if (!start) return 'Baru dibuka'
+  const seconds = Math.max(0, Math.floor((nowTick.value - start) / 1000))
+  if (seconds < 60) return `${seconds} dtk`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} mnt`
+  return `${Math.floor(minutes / 60)} j ${minutes % 60} mnt`
+}
+
+function processTimeTitle(profile) {
+  if (!isOpen(profile)) return 'Profil sedang tertutup'
+  const start = processStart(profile)
+  return start ? `Dibuka sejak ${timestampLabel(Math.floor(start / 1000))}` : 'Profil terbuka'
 }
 
 function lastOpenedTitle(profile) {
   return profile.last_open_time
     ? `Terakhir dibuka: ${lastOpenedLabel(profile)}`
     : 'Belum pernah dibuka'
-}
-
-function noteLabel(profile) {
-  return profile.note ? `Catatan: ${profile.note}` : 'Tanpa catatan'
 }
 
 function badgeTextColor(hex) {
@@ -798,10 +892,14 @@ function sortByProfileId(a, b) {
 onMounted(() => {
   refreshAll()
   pollTimer = setInterval(pollOpened, 5000)
+  clockTimer = setInterval(() => {
+    if (opened.value.size) nowTick.value = Date.now()
+  }, 1000)
 })
 
 onUnmounted(() => {
   clearInterval(pollTimer)
+  clearInterval(clockTimer)
   clearTimeout(searchTimer)
 })
 
@@ -843,6 +941,10 @@ useOnRefresh(() => refreshAll())
               <el-option label="Semua Grup" value="all" />
               <el-option v-for="group in groups" :key="group.id" :label="group.title" :value="group.id" />
             </el-select>
+            <el-select v-model="tagFilter" class="tag-select" placeholder="Semua Tag">
+              <el-option label="Semua Tag" value="all" />
+              <el-option v-for="tag in tags" :key="tag.id" :label="tag.title" :value="tag.id" />
+            </el-select>
             <el-tooltip content="Kelola grup" placement="top" :show-after="200">
               <el-button
                 class="icon-action"
@@ -854,6 +956,22 @@ useOnRefresh(() => refreshAll())
             <el-tooltip content="Muat ulang daftar" placement="top" :show-after="200">
               <el-button class="icon-action" :icon="Refresh" aria-label="Muat ulang daftar" @click="refreshAll" />
             </el-tooltip>
+            <el-dropdown trigger="click" :hide-on-click="false">
+              <el-button :icon="Menu" aria-label="Pilih kolom">Pilih Kolom</el-button>
+              <template #dropdown>
+                <div class="column-picker">
+                  <el-checkbox
+                    v-for="column in COLUMN_OPTIONS"
+                    :key="column.key"
+                    :model-value="isColumnVisible(column.key)"
+                    @change="toggleColumn(column.key)"
+                  >{{ column.label }}</el-checkbox>
+                  <div class="column-picker-footer">
+                    <el-button link type="primary" size="small" @click="showAllColumns">Tampilkan semua</el-button>
+                  </div>
+                </div>
+              </template>
+            </el-dropdown>
           </div>
         </div>
         <div class="toolbar-row">
@@ -902,8 +1020,8 @@ useOnRefresh(() => refreshAll())
         row-key="profile_id"
         @selection-change="onSelectionChange"
       >
-        <el-table-column type="selection" width="44" />
-        <el-table-column label="No." width="76" sortable :sort-method="sortByProfileId">
+        <el-table-column type="selection" width="38" />
+        <el-table-column label="No." width="54" sortable :sort-method="sortByProfileId">
           <template #default="{ row }">
             <span
               class="profile-badge"
@@ -911,15 +1029,17 @@ useOnRefresh(() => refreshAll())
             >{{ row.profile_id }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Grup / Platform" width="120">
+        <el-table-column v-if="isColumnVisible('name')" label="Nama" min-width="150">
           <template #default="{ row }">
-            <div class="cell-stack">
-              <span class="cell-main">{{ groupTitle(row.group_id) }}</span>
-              <span class="cell-sub">{{ platformLabel(row) }}</span>
-            </div>
+            <button type="button" class="profile-name" :title="row.name" @click="openEdit(row)">{{ row.name }}</button>
           </template>
         </el-table-column>
-        <el-table-column label="Tag" width="170">
+        <el-table-column v-if="isColumnVisible('group')" label="Grup" width="100">
+          <template #default="{ row }">
+            <span class="cell-main" :title="groupTitle(row.group_id)">{{ groupTitle(row.group_id) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="isColumnVisible('tag')" label="Tag" width="120">
           <template #default="{ row }">
             <div class="tag-cell" role="button" tabindex="0" @click="openEdit(row)" @keydown.enter="openEdit(row)">
               <template v-if="profileTags(row).length">
@@ -935,15 +1055,12 @@ useOnRefresh(() => refreshAll())
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Judul Profil" min-width="180">
+        <el-table-column v-if="isColumnVisible('platform')" label="Platform" width="100">
           <template #default="{ row }">
-            <div class="cell-stack">
-              <button type="button" class="profile-name" @click="openEdit(row)">{{ row.name }}</button>
-              <span class="cell-sub" :title="noteLabel(row)">{{ noteLabel(row) }}</span>
-            </div>
+            <span class="cell-main" :title="platformLabel(row)">{{ platformLabel(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Proxy" width="160">
+        <el-table-column v-if="isColumnVisible('proxy')" label="Proxy" width="118">
           <template #default="{ row }">
             <div class="cell-stack">
               <span class="cell-main">{{ proxyTypeLabel(row) }}</span>
@@ -951,7 +1068,7 @@ useOnRefresh(() => refreshAll())
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Status" width="90">
+        <el-table-column v-if="isColumnVisible('status')" label="Status" width="80">
           <template #default="{ row }">
             <span :class="['status-text', isOpen(row) ? 'is-open' : 'is-closed']">
               <span :class="['status-dot', isOpen(row) ? 'ok' : 'idle']"></span>
@@ -959,21 +1076,40 @@ useOnRefresh(() => refreshAll())
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="Waktu" width="140">
+        <el-table-column v-if="isColumnVisible('created')" label="Dibuat" width="100">
           <template #default="{ row }">
-            <div class="time-cell">
-              <el-tooltip :content="`Dibuat: ${createdLabel(row.created_at)}`" placement="top" :show-after="200">
-                <span class="time-line is-created">{{ createdLabel(row.created_at) }}</span>
-              </el-tooltip>
-              <el-tooltip :content="lastOpenedTitle(row)" placement="bottom" :show-after="200">
-                <span :class="['time-line', row.last_open_time ? 'is-last' : 'is-empty']">
-                  {{ lastOpenedLabel(row) }}
-                </span>
-              </el-tooltip>
-            </div>
+            <span v-if="row.created_at" class="time-stack" :title="createdLabel(row.created_at)">
+              <span class="time-line is-created">{{ dateLabel(row.created_at) }}</span>
+              <span class="time-line is-created">{{ timeLabel(row.created_at) }}</span>
+            </span>
+            <span v-else class="time-line is-empty">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="Operasi" width="210" fixed="right">
+        <el-table-column v-if="isColumnVisible('last_open')" label="Terakhir Dibuka" width="124">
+          <template #default="{ row }">
+            <el-tooltip :content="lastOpenedTitle(row)" placement="top" :show-after="200">
+              <span v-if="row.last_open_time" class="time-stack">
+                <span class="time-line is-last">{{ dateLabel(row.last_open_time) }}</span>
+                <span class="time-line is-last">{{ timeLabel(row.last_open_time) }}</span>
+              </span>
+              <span v-else class="time-line is-empty">Belum dibuka</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="isColumnVisible('note')" label="Catatan" width="150">
+          <template #default="{ row }">
+            <span v-if="row.note" class="cell-sub note-cell" :title="row.note">{{ row.note }}</span>
+            <span v-else class="cell-sub is-empty">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="isColumnVisible('process')" label="Waktu Proses" width="110">
+          <template #default="{ row }">
+            <el-tooltip :content="processTimeTitle(row)" placement="top" :show-after="200">
+              <span :class="['time-line', isOpen(row) ? 'is-last' : 'is-empty']">{{ processTimeLabel(row) }}</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column label="Operasi" width="196" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
               <el-button
@@ -1025,7 +1161,7 @@ useOnRefresh(() => refreshAll())
             <p class="empty-text">
               {{
                 hasFilter
-                  ? 'Ubah kata kunci atau filter grup untuk melihat profil lain.'
+                  ? 'Ubah kata kunci atau filter grup, tag, dan status untuk melihat profil lain.'
                   : 'Profil menyimpan fingerprint dan proxy untuk membuka Chromium terisolasi.'
               }}
             </p>

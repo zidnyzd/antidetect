@@ -153,7 +153,8 @@ def profile_get(conn, profile_id):
     return conn.execute("SELECT * FROM profiles WHERE id = ?", (int(profile_id),)).fetchone()
 
 
-def list_profiles(conn, page=1, limit=10, group_id=None, name=None, profile_id=None, deleted=False):
+def list_profiles(conn, page=1, limit=10, group_id=None, name=None, profile_id=None, deleted=False,
+                  tag_id=None):
     clauses, args = [], []
     clauses.append("deleted_at IS NOT NULL" if deleted else "deleted_at IS NULL")
     if profile_id:
@@ -162,6 +163,11 @@ def list_profiles(conn, page=1, limit=10, group_id=None, name=None, profile_id=N
     if group_id:
         clauses.append("group_id = ?")
         args.append(int(group_id))
+    if tag_id not in (None, "", 0, "0"):
+        clauses.append(
+            "EXISTS (SELECT 1 FROM json_each(profiles.tag_ids) WHERE json_each.value = ?)"
+        )
+        args.append(int(tag_id))
     if name:
         clauses.append("name LIKE ?")
         args.append(f"%{name}%")

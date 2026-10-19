@@ -1,18 +1,22 @@
 <script setup>
 import { useRoute } from 'vue-router'
-import { Box, Connection, Delete, Monitor, Setting } from '@element-plus/icons-vue'
+import { Box, Connection, DataBoard, Delete, Link, Monitor, Setting } from '@element-plus/icons-vue'
 
 defineProps({ collapsed: Boolean })
 
 const route = useRoute()
 
 const browserItems = [
-  { path: '/', label: 'Daftar Profil', icon: Monitor },
+  { path: '/dashboard', label: 'Dasbor', icon: DataBoard },
+  { path: '/profiles', label: 'Daftar Profil', icon: Monitor },
   { path: '/recycle', label: 'Keranjang Sampah', icon: Delete },
   { path: '/proxies', label: 'Proxy', icon: Connection },
   { path: '/extensions', label: 'Extension', icon: Box },
 ]
-const systemItems = [{ path: '/settings', label: 'Pengaturan', icon: Setting }]
+const systemItems = [
+  { path: '/api-docs', label: 'API', icon: Link },
+  { path: '/settings', label: 'Pengaturan', icon: Setting },
+]
 
 function isActive(path) {
   return route.path === path

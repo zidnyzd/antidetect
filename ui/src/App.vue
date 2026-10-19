@@ -15,7 +15,9 @@ const apiOk = ref(false)
 const spinning = ref(false)
 const refreshTick = useRefreshSignal()
 
-const crumb = computed(() => route.meta.crumb || 'Daftar Profil')
+const crumb = computed(() => route.meta.crumb || 'Ringkasan')
+const section = computed(() => route.meta.section || 'Profil Browser')
+const showSection = computed(() => section.value !== 'Dasbor')
 
 let clockTimer = null
 let healthTimer = null
@@ -79,9 +81,11 @@ onUnmounted(() => {
           </button>
         </el-tooltip>
         <nav class="breadcrumb" aria-label="Breadcrumb">
-          <span class="crumb">Dasbor</span>
-          <span class="crumb-sep">/</span>
-          <span class="crumb">Profil Browser</span>
+          <router-link to="/dashboard" class="crumb crumb-link">Dasbor</router-link>
+          <template v-if="showSection">
+            <span class="crumb-sep">/</span>
+            <span class="crumb">{{ section }}</span>
+          </template>
           <span class="crumb-sep">/</span>
           <span class="crumb current">{{ crumb }}</span>
         </nav>

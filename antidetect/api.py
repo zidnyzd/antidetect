@@ -124,6 +124,7 @@ def profile_reset_seed(params):
 def profile_list(params):
     page = int(params.get("page") or 1)
     limit = int(params.get("limit") or 10)
+    tag_id = params.get("tab_id", params.get("tag_id"))
     with store.db() as conn:
         total, rows = store.list_profiles(
             conn,
@@ -132,6 +133,7 @@ def profile_list(params):
             group_id=params.get("group_id"),
             name=params.get("name"),
             profile_id=params.get("profile_id"),
+            tag_id=tag_id,
         )
         return {"total": total, "data": [store.profile_to_dict(r) for r in rows]}
 

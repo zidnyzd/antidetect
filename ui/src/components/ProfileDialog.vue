@@ -98,6 +98,16 @@ const GPU_VENDORS = [
   'Google Inc. (AMD)',
   'Google Inc. (Apple)',
 ]
+const CUSTOM_SITE_ID = 22
+const ACCOUNT_PRESETS = [
+  { key: 'Facebook', site_id: 1, site_url: 'https://www.facebook.com/' },
+  { key: 'TikTok', site_id: 2, site_url: 'https://www.tiktok.com/' },
+  { key: 'Instagram', site_id: 3, site_url: 'https://www.instagram.com/' },
+  { key: 'Shopee', site_id: 4, site_url: 'https://shopee.co.id/' },
+  { key: 'Tokopedia', site_id: 5, site_url: 'https://www.tokopedia.com/' },
+  { key: 'Google', site_id: 6, site_url: 'https://www.google.com/' },
+  { key: 'Lazada', site_id: 7, site_url: 'https://www.lazada.co.id/' },
+]
 
 const activeTab = ref('account')
 const busy = ref(false)
@@ -120,6 +130,8 @@ function emptyForm() {
     tag_id: [],
     color: COLORS[0],
     note: '',
+    site_id: CUSTOM_SITE_ID,
+    account_preset: 'Custom',
     site_url: '',
     proxy_type: 'direct',
     proxy_ip: '',
@@ -187,6 +199,38 @@ function proxyTypeValue(raw) {
   return ['http', 'https', 'socks5'].includes(value) ? value : 'direct'
 }
 
+function hostOf(value) {
+  try {
+    const parsed = new URL(String(value || ''))
+    return parsed.hostname.replace(/^www\./, '').toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+function presetFor(siteId, siteUrl) {
+  const id = Number(siteId)
+  const host = hostOf(siteUrl)
+  const byId = ACCOUNT_PRESETS.find((preset) => preset.site_id === id)
+  if (byId && (!host || host === hostOf(byId.site_url))) return byId.key
+  if (host) {
+    const byUrl = ACCOUNT_PRESETS.find((preset) => hostOf(preset.site_url) === host)
+    if (byUrl) return byUrl.key
+  }
+  return 'Custom'
+}
+
+function applyAccountPreset(key) {
+  const preset = ACCOUNT_PRESETS.find((item) => item.key === key)
+  if (!preset) {
+    form.site_id = CUSTOM_SITE_ID
+    return
+  }
+  form.site_id = preset.site_id
+  form.site_url = preset.site_url
+  errors.site_url = ''
+}
+
 function fillFromProfile(profile) {
   const fingerprint = profile.fingerprint_config || {}
   const proxy = profile.proxy_config || {}
@@ -195,7 +239,9 @@ function fillFromProfile(profile) {
   form.tag_id = Array.isArray(profile.tab_id) ? [...profile.tab_id] : []
   form.color = profile.color || COLORS[0]
   form.note = profile.note || ''
+  form.site_id = profile.site_id ?? CUSTOM_SITE_ID
   form.site_url = profile.site_url || ''
+  form.account_preset = presetFor(form.site_id, form.site_url)
   form.proxy_type = proxyTypeValue(proxy.proxy_type)
   form.proxy_ip = proxy.proxy_ip || ''
   form.proxy_port = proxy.proxy_port ?? null
@@ -330,7 +376,7 @@ function validateForm() {
   const url = form.site_url.trim()
   if (url && !isHttpUrl(url)) {
     errors.site_url = 'URL harus diawali http:// atau https://'
-    firstTab = firstTab || 'preference'
+    firstTab = firstTab || 'account'
   }
   if (firstTab) activeTab.value = firstTab
   return !firstTab
@@ -378,7 +424,7 @@ function formPayload(tagIds = form.tag_id) {
     tag_id: [...(tagIds || [])],
     color: form.color,
     note: form.note.trim() || null,
-    site_id: url ? 21 : 22,
+    site_id: form.site_id ?? CUSTOM_SITE_ID,
     site_url: url || null,
     proxy_config: proxyPayload(),
     fingerprint_config: fingerprintPayload(),
@@ -602,10 +648,28 @@ async function testProxy() {
               <el-option v-for="tag in tags" :key="tag.id" :label="tag.title" :value="tag.id" />
             </el-select>
           </el-form-item>
+          <el-form-item label="Platform Akun">
+            <el-select
+              v-model="form.account_preset"
+              class="field-260"
+              placeholder="Pilih platform"
+              @change="applyAccountPreset"
+            >
+              <el-option v-for="preset in ACCOUNT_PRESETS" :key="preset.key" :label="preset.key" :value="preset.key" />
+              <el-option label="Custom" value="Custom" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="URL Awal" :error="errors.site_url">
+            <el-input
+              v-model="form.site_url"
+              placeholder="https://contoh.com"
+              @input="errors.site_url = ''"
+            />
+          </el-form-item>
         </el-form>
         <p class="form-hint">
-          Platform, fingerprint, dan proxy diatur di tab berikutnya. Nama, grup, dan tag dipakai untuk mengenali profil di
-          daftar.
+          Preset platform mengisi site_id dan URL awal, URL tetap bisa diedit. Fingerprint dan proxy diatur di tab
+          berikutnya. Nama, grup, dan tag dipakai untuk mengenali profil di daftar.
         </p>
       </el-tab-pane>
 
@@ -802,9 +866,6 @@ async function testProxy() {
                 @click="form.color = color"
               ></button>
             </div>
-          </el-form-item>
-          <el-form-item label="URL Awal" :error="errors.site_url">
-            <el-input v-model="form.site_url" placeholder="https://contoh.com" @input="errors.site_url = ''" />
           </el-form-item>
           <el-form-item label="Catatan">
             <el-input
