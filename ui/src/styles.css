@@ -594,6 +594,35 @@ button {
   white-space: nowrap;
 }
 
+.time-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.time-line {
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.time-line.is-created {
+  color: var(--ix-muted);
+}
+
+.time-line.is-last {
+  color: var(--ix-text-secondary);
+  font-weight: 500;
+}
+
+.time-line.is-empty {
+  color: var(--ix-muted);
+  font-style: italic;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;

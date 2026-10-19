@@ -95,9 +95,12 @@ def profile_open(params):
         profile = store.profile_to_dict(row, include_seed=True)
     profile["id"] = pid
     try:
-        return launcher.open_profile(profile, app_args=params.get("args"))
+        result = launcher.open_profile(profile, app_args=params.get("args"))
     except launcher.LaunchError as error:
         raise ApiError(1003, str(error))
+    with store.db() as conn:
+        store.mark_opened(conn, pid)
+    return result
 
 
 @action("profile-open-with-random-fingerprint")
@@ -121,9 +124,12 @@ def profile_open_random(params):
         profile["seed"] = store.latest_seed(conn, pid)
     profile["id"] = pid
     try:
-        return launcher.open_profile(profile, app_args=params.get("args"))
+        result = launcher.open_profile(profile, app_args=params.get("args"))
     except launcher.LaunchError as error:
         raise ApiError(1003, str(error))
+    with store.db() as conn:
+        store.mark_opened(conn, pid)
+    return result
 
 
 @action("profile-close")

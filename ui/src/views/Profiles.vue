@@ -185,10 +185,19 @@ function markBusy(profileId, value) {
   busy.value = next
 }
 
+function markOpenedLocally(profileId) {
+  const stamp = Math.floor(Date.now() / 1000)
+  for (const list of [rows.value, pool.value]) {
+    const profile = list.find((item) => item.profile_id === profileId)
+    if (profile) profile.last_open_time = stamp
+  }
+}
+
 async function openById(profileId, name) {
   markBusy(profileId, true)
   try {
     await api.openProfile(profileId)
+    markOpenedLocally(profileId)
     opened.value = new Set([...opened.value, profileId])
     ElMessage.success(`Profil "${name}" dibuka`)
   } catch (error) {
@@ -211,6 +220,7 @@ async function toggleOpen(profile) {
       ElMessage.success(`Profil "${profile.name}" ditutup`)
     } else {
       await api.openProfile(profile.profile_id)
+      markOpenedLocally(profile.profile_id)
       opened.value = new Set([...opened.value, profile.profile_id])
       ElMessage.success(`Profil "${profile.name}" dibuka`)
     }
@@ -405,10 +415,30 @@ function proxyHostLabel(profile) {
   return `${config.proxy_ip}:${config.proxy_port ?? ''}`
 }
 
-function createdAtParts(value) {
-  if (!value) return { date: '-', time: '' }
+function timestampLabel(value) {
+  if (!value) return ''
+  if (typeof value === 'number') {
+    const date = new Date(value * 1000)
+    if (Number.isNaN(date.getTime())) return ''
+    const pad = (part) => String(part).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  }
   const [date, time] = String(value).split(' ')
-  return { date: date || '-', time: (time || '').slice(0, 5) }
+  return `${date || ''} ${(time || '').slice(0, 5)}`.trim()
+}
+
+function createdLabel(value) {
+  return timestampLabel(value) || '-'
+}
+
+function lastOpenedLabel(profile) {
+  return timestampLabel(profile.last_open_time) || 'Belum dibuka'
+}
+
+function lastOpenedTitle(profile) {
+  return profile.last_open_time
+    ? `Terakhir dibuka: ${lastOpenedLabel(profile)}`
+    : 'Belum pernah dibuka'
 }
 
 function noteLabel(profile) {
@@ -532,7 +562,7 @@ useOnRefresh(() => refreshAll())
             >{{ row.profile_id }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Grup / Platform" width="130">
+        <el-table-column label="Grup / Platform" width="120">
           <template #default="{ row }">
             <div class="cell-stack">
               <span class="cell-main">{{ groupTitle(row.group_id) }}</span>
@@ -564,7 +594,7 @@ useOnRefresh(() => refreshAll())
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Proxy" width="170">
+        <el-table-column label="Proxy" width="160">
           <template #default="{ row }">
             <div class="cell-stack">
               <span class="cell-main">{{ proxyTypeLabel(row) }}</span>
@@ -580,11 +610,17 @@ useOnRefresh(() => refreshAll())
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="Dibuat" width="120">
+        <el-table-column label="Waktu" width="140">
           <template #default="{ row }">
-            <div class="cell-stack">
-              <span class="cell-main">{{ createdAtParts(row.created_at).date }}</span>
-              <span class="cell-sub">{{ createdAtParts(row.created_at).time }}</span>
+            <div class="time-cell">
+              <el-tooltip :content="`Dibuat: ${createdLabel(row.created_at)}`" placement="top" :show-after="200">
+                <span class="time-line is-created">{{ createdLabel(row.created_at) }}</span>
+              </el-tooltip>
+              <el-tooltip :content="lastOpenedTitle(row)" placement="bottom" :show-after="200">
+                <span :class="['time-line', row.last_open_time ? 'is-last' : 'is-empty']">
+                  {{ lastOpenedLabel(row) }}
+                </span>
+              </el-tooltip>
             </div>
           </template>
         </el-table-column>

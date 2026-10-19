@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     fingerprint_config TEXT,
     preference_config TEXT,
     tag_ids TEXT DEFAULT '[]',
+    last_open_time INTEGER,
     seed INTEGER,
     created_at TEXT,
     updated_at TEXT
@@ -73,6 +74,8 @@ def init():
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(profiles)")}
         if "tag_ids" not in columns:
             conn.execute("ALTER TABLE profiles ADD COLUMN tag_ids TEXT DEFAULT '[]'")
+        if "last_open_time" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_open_time INTEGER")
         group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
         if "created_at" not in group_columns:
             conn.execute("ALTER TABLE groups ADD COLUMN created_at TEXT")
@@ -125,6 +128,7 @@ def profile_to_dict(row, include_seed=False):
         "fingerprint_config": _loads(row["fingerprint_config"]),
         "preference_config": _loads(row["preference_config"]),
         "tab_id": _load_list(row["tag_ids"]),
+        "last_open_time": row["last_open_time"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -207,6 +211,14 @@ def update_profile(conn, profile_id, data):
     fields.append("updated_at = ?")
     args.extend([now(), int(profile_id)])
     conn.execute(f"UPDATE profiles SET {', '.join(fields)} WHERE id = ?", args)
+    conn.commit()
+
+
+def mark_opened(conn, profile_id, timestamp=None):
+    conn.execute(
+        "UPDATE profiles SET last_open_time = ? WHERE id = ?",
+        (int(timestamp or time.time()), int(profile_id)),
+    )
     conn.commit()
 
 
