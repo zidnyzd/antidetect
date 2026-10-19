@@ -7,6 +7,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -21,6 +22,8 @@ ENGINE_DIR = Path(
 )
 CHROME = ENGINE_DIR / "chrome"
 CHROMEDRIVER = ENGINE_DIR / "chromedriver"
+KERNELS_DIR = DATA_DIR / "kernels"
+BUILTIN_KERNEL_ID = "builtin"
 PROFILES_DIR = DATA_DIR / "profiles"
 GOST_FALLBACK = Path.home() / ".local" / "bin" / "gost"
 
@@ -55,6 +58,90 @@ def flag_supported(name, binary=None):
 
 def kernel_support(binary=None):
     return {key: flag_supported(name, binary) for key, name in GPU_FLAG_NAMES.items()}
+
+
+_kernel_versions = {}
+_kernel_versions_lock = threading.Lock()
+
+
+def _executable(path):
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def _inside_kernels(path):
+    try:
+        Path(path).resolve().relative_to(KERNELS_DIR.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _read_kernel_version(binary):
+    try:
+        done = subprocess.run(
+            [str(binary), "--version"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for stream in (done.stdout, done.stderr):
+        for line in (stream or "").splitlines():
+            line = line.strip()
+            if line:
+                return line
+    return None
+
+
+def kernel_version(binary):
+    """Read chrome --version once per binary path."""
+    key = str(binary)
+    with _kernel_versions_lock:
+        if key not in _kernel_versions:
+            _kernel_versions[key] = _read_kernel_version(key)
+        return _kernel_versions[key]
+
+
+def available_kernels():
+    """Builtin engine plus each executable KERNELS_DIR/<name>/chrome."""
+    kernels = [
+        {
+            "id": BUILTIN_KERNEL_ID,
+            "name": "Engine Bawaan",
+            "version": kernel_version(CHROME),
+            "path": str(CHROME),
+            "active": True,
+            "builtin": True,
+        }
+    ]
+    try:
+        entries = sorted(KERNELS_DIR.iterdir()) if KERNELS_DIR.is_dir() else []
+    except OSError:
+        entries = []
+    for entry in entries:
+        binary = entry / "chrome"
+        if entry.name == BUILTIN_KERNEL_ID or not _executable(binary) or not _inside_kernels(binary):
+            continue
+        kernels.append(
+            {
+                "id": entry.name,
+                "name": entry.name,
+                "version": kernel_version(binary),
+                "path": str(binary),
+                "active": False,
+                "builtin": False,
+            }
+        )
+    return kernels
+
+
+def kernel_for(profile):
+    """Profile kernel inside KERNELS_DIR, else the builtin engine."""
+    raw = str((profile.get("preference_config") or {}).get("kernel_path") or "").strip()
+    if not raw:
+        return CHROME
+    candidate = Path(raw)
+    if not _inside_kernels(candidate) or not _executable(candidate):
+        return CHROME
+    return candidate.resolve()
 
 
 class LaunchError(Exception):
@@ -187,11 +274,12 @@ def stop_proxy_bridge(proc):
 
 def build_args(profile, port, app_args=None, proxy_arg=None):
     fp = profile.get("fingerprint_config") or {}
+    binary = kernel_for(profile)
     data_dir = PROFILES_DIR / str(profile["id"]) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     args = [
-        str(CHROME),
+        str(binary),
         f"--user-data-dir={data_dir}",
         f"--fingerprint={profile['seed']}",
         "--fingerprint-brand=Chrome",
@@ -221,7 +309,7 @@ def build_args(profile, port, app_args=None, proxy_arg=None):
     if fp.get("timezone"):
         args.append(f"--timezone={fp['timezone']}")
 
-    args.extend(_gpu_args(fp))
+    args.extend(_gpu_args(fp, binary))
 
     extension_ids = (profile.get("preference_config") or {}).get("extension_ids")
     if extension_ids and not os.environ.get("ANTIDETECT_NO_EXTENSIONS"):

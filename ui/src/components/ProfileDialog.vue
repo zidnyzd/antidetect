@@ -113,7 +113,10 @@ const activeTab = ref('account')
 const busy = ref(false)
 const seedBusy = ref(false)
 const seedOverride = ref(null)
-const engineCaps = ref(null)
+const kernels = ref([])
+const kernelPath = ref('')
+const kernelError = ref('')
+const kernelSavedMissing = ref(false)
 const savedProxies = ref([])
 const savedProxyId = ref(null)
 const extensionOptions = ref([])
@@ -173,7 +176,15 @@ const seedText = computed(() => {
   if (!isEdit.value) return 'Seed dibuat saat disimpan'
   return displaySeed.value == null ? 'Seed belum terbaca' : String(displaySeed.value)
 })
-const gpuSupport = computed(() => engineCaps.value || null)
+const builtinKernelPath = computed(() => {
+  const list = kernels.value
+  const builtin = list.find((kernel) => kernel.builtin) || list.find((kernel) => kernel.active) || list[0]
+  return builtin?.path || ''
+})
+const selectedKernel = computed(
+  () => kernels.value.find((kernel) => kernel.path === kernelPath.value) || null
+)
+const gpuSupport = computed(() => selectedKernel.value?.supports || null)
 const gpuFieldHint = computed(() => {
   const support = gpuSupport.value
   if (!support) return ''
@@ -182,7 +193,7 @@ const gpuFieldHint = computed(() => {
   if (!support.gpu_vendor) missing.push('GPU Vendor')
   if (!support.gpu_renderer) missing.push('GPU Renderer')
   if (!missing.length) return ''
-  return `Kernel aktif belum mendukung ${missing.join(' dan ')}, nilainya disimpan tapi tidak diterapkan engine.`
+  return `Kernel terpilih belum mendukung ${missing.join(' dan ')}, nilainya disimpan tapi tidak diterapkan engine.`
 })
 const gpuSwitchHint = computed(() => {
   const support = gpuSupport.value
@@ -191,7 +202,7 @@ const gpuSwitchHint = computed(() => {
   if (support.disable_spoofing) {
     return 'Jika diaktifkan, kernel memakai --disable-spoofing=gpu: situs membaca GPU asli host.'
   }
-  return 'Kernel aktif tidak punya cara mematikan spoofing GPU.'
+  return 'Kernel terpilih tidak punya cara mematikan spoofing GPU.'
 })
 
 function proxyTypeValue(raw) {
@@ -261,10 +272,24 @@ function fillFromProfile(profile) {
   form.disable_gpu_fingerprint = !!fingerprint.disable_gpu_fingerprint
   form.timezone = fingerprint.timezone || 'Asia/Jakarta'
   form.language = fingerprint.language || 'id-ID'
-  const extensionIds = (profile.preference_config || {}).extension_ids
+  const preference = profile.preference_config || {}
+  const extensionIds = preference.extension_ids
   form.extension_ids = Array.isArray(extensionIds)
     ? extensionIds.map((id) => Number(id)).filter((id) => Number.isInteger(id))
     : []
+  kernelPath.value = String(preference.kernel_path || '')
+}
+
+function kernelLabel(kernel) {
+  return `${kernel.name} · ${kernel.version || 'versi tidak terbaca'}`
+}
+
+function syncKernelPath() {
+  if (!kernels.value.length) return
+  const saved = kernelPath.value
+  const available = kernels.value.some((kernel) => kernel.path === saved)
+  kernelSavedMissing.value = !!saved && !available && saved !== builtinKernelPath.value
+  if (!available) kernelPath.value = builtinKernelPath.value
 }
 
 function clearErrors() {
@@ -275,17 +300,16 @@ function resetForm() {
   Object.assign(form, emptyForm())
   savedProxyId.value = null
   seedOverride.value = null
+  kernelPath.value = ''
+  kernelSavedMissing.value = false
   proxyCheck.loading = false
   proxyCheck.ok = null
   proxyCheck.text = ''
   clearErrors()
   activeTab.value = 'account'
-  if (props.profile) {
-    fillFromProfile(props.profile)
-    initialPayload = formPayload()
-  } else {
-    initialPayload = null
-  }
+  if (props.profile) fillFromProfile(props.profile)
+  syncKernelPath()
+  initialPayload = props.profile ? formPayload() : null
 }
 
 async function loadSavedProxies() {
@@ -311,15 +335,16 @@ async function loadExtensions() {
   }
 }
 
-async function loadEngineCaps() {
+async function loadKernels() {
+  kernelError.value = ''
   try {
     const result = await api.engineInfo()
-    const kernels = Array.isArray(result?.kernels) ? result.kernels : []
-    const active = kernels.find((kernel) => kernel.active) || kernels[0] || {}
-    engineCaps.value = active.supports || null
-  } catch {
-    engineCaps.value = null
+    kernels.value = Array.isArray(result?.kernels) ? result.kernels : []
+  } catch (error) {
+    kernels.value = []
+    kernelError.value = error.message
   }
+  syncKernelPath()
 }
 
 watch(
@@ -329,7 +354,7 @@ watch(
       resetForm()
       loadSavedProxies()
       loadExtensions()
-      loadEngineCaps()
+      loadKernels()
     }
   }
 )
@@ -413,7 +438,11 @@ function proxyPayload() {
 function preferencePayload() {
   const saved = props.profile?.preference_config
   const base = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}
-  return { ...base, extension_ids: [...form.extension_ids] }
+  const payload = { ...base, extension_ids: [...form.extension_ids] }
+  const builtin = builtinKernelPath.value
+  if (kernelPath.value && kernelPath.value !== builtin) payload.kernel_path = kernelPath.value
+  else delete payload.kernel_path
+  return payload
 }
 
 function formPayload(tagIds = form.tag_id) {
@@ -853,6 +882,31 @@ async function testProxy() {
 
       <el-tab-pane label="Preferensi" name="preference">
         <el-form label-width="150px" label-position="right" class="dialog-form" @submit.prevent>
+          <el-form-item label="Versi Kernel">
+            <el-select
+              v-if="kernels.length > 1"
+              v-model="kernelPath"
+              class="field-320"
+              placeholder="Pilih kernel"
+            >
+              <el-option
+                v-for="kernel in kernels"
+                :key="kernel.id"
+                :label="kernelLabel(kernel)"
+                :value="kernel.path"
+              />
+            </el-select>
+            <div v-else-if="kernels.length === 1" class="kernel-inline">
+              <span class="kernel-inline-version mono">{{ kernels[0].version || 'Versi tidak terbaca' }}</span>
+              <span class="form-hint">Hanya satu kernel terpasang.</span>
+            </div>
+            <span v-else class="form-hint">
+              {{ kernelError ? `engine-info gagal: ${kernelError}` : 'Memuat kernel...' }}
+            </span>
+          </el-form-item>
+          <p v-if="kernelSavedMissing" class="form-hint is-warn">
+            Kernel tersimpan tidak tersedia lagi, profil memakai engine bawaan.
+          </p>
           <el-form-item label="Warna Profil">
             <div class="color-swatches">
               <button

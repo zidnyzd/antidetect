@@ -54,7 +54,9 @@ venv/bin/python scripts/selftest.py
 - [x] filter tag, pilih kolom tersimpan, preset platform akun
 - [x] halaman Dasbor dan halaman API dengan contoh curl dan Selenium
 - [x] log operasi lokal dengan filter jenis, pencarian, dan bersihkan log
-- [ ] pemilihan versi kernel dan penegakan fingerprint GPU di engine
+- [x] pilih kernel per profil dari folder `kernels/<nama>/chrome` dengan
+  validasi path dan fallback ke engine bawaan
+- [ ] penegakan fingerprint GPU di engine (binary 150 tidak punya flag GPU)
 
 ## Pemetaan fingerprint_config ke flag engine
 
@@ -192,6 +194,12 @@ Halaman Log mencatat operasi penting (profil, proxy, extension, grup, tag,
 sistem) di database lokal, dengan filter jenis, pencarian pesan, pagination,
 dan tombol bersihkan. Cookie dan password tidak pernah ikut dicatat.
 
+Versi Kernel di tab Preferensi memilih binary dari
+`~/.local/share/antidetect/kernels/<nama>/chrome`. Bila hanya satu kernel,
+yang tampil versi engine dan hint; path di luar folder kernels atau tidak ada
+ditolak backend, dan profil kembali ke engine bawaan bila kernel tersimpan
+hilang.
+
 ```bash
 cd ui
 npm install
@@ -205,8 +213,8 @@ profil, kelola grup, filter status dan grup, pencarian, pagination, cookie
 import/export, aksi cache, pemulihan keranjang sampah, operasi massal, cek
 proxy, pilih proxy tersimpan, atur jendela, filter tag, pilih kolom,
 ekspor/impor profil, bookmark, password tersimpan, preset platform, dasbor,
-halaman API, log operasi, serta CRUD proxy. Shell desktop (Tauri/Electron)
-menyusul.
+halaman API, log operasi, pilih kernel per profil, serta CRUD proxy. Shell
+desktop (Tauri/Electron) menyusul.
 
 ## Lisensi
 

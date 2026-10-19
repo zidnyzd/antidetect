@@ -1351,6 +1351,23 @@ button {
   width: 260px;
 }
 
+.field-320 {
+  width: 320px;
+}
+
+.kernel-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.kernel-inline-version {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ix-text);
+}
+
 .dialog-form .el-form-item .el-input,
 .dialog-form .el-form-item .el-select,
 .dialog-form .el-form-item .el-textarea {
@@ -1540,12 +1557,18 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
-.kernel-version {
+.kernel-name {
   font-size: 13px;
   font-weight: 600;
   color: var(--ix-text);
+}
+
+.kernel-version {
+  font-size: 12px;
+  color: var(--ix-muted);
 }
 
 .kernel-badge {

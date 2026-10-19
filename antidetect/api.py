@@ -2,9 +2,8 @@
 import base64
 import json
 import shutil
-import subprocess
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from . import (
     bookmarks,
@@ -16,7 +15,6 @@ from . import (
     proxycheck,
     store,
 )
-from .paths import DATA_DIR
 
 ACTIONS = {}
 
@@ -78,65 +76,34 @@ def _event_name(name, limit=80):
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-_engine_versions = {}
-_engine_versions_lock = threading.Lock()
-
-
-def _read_engine_version(binary):
-    try:
-        done = subprocess.run(
-            [str(binary), "--version"], capture_output=True, text=True, timeout=15
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    for stream in (done.stdout, done.stderr):
-        for line in (stream or "").splitlines():
-            line = line.strip()
-            if line:
-                return line
-    return None
-
-
-def _engine_version(binary):
-    """Read chrome --version once per process."""
-    key = str(binary)
-    with _engine_versions_lock:
-        if key not in _engine_versions:
-            _engine_versions[key] = _read_engine_version(key)
-        return _engine_versions[key]
-
-
 @action("engine-info")
 def engine_info(params):
     kernels = [
-        {
-            "version": _engine_version(launcher.CHROME),
-            "path": str(launcher.CHROME),
-            "active": True,
-            "supports": launcher.kernel_support(),
-        }
+        {**kernel, "supports": launcher.kernel_support(kernel["path"])}
+        for kernel in launcher.available_kernels()
     ]
-    root = DATA_DIR / "kernels"
-    try:
-        entries = sorted(root.iterdir()) if root.is_dir() else []
-    except OSError:
-        entries = []
-    for entry in entries:
-        binary = entry / "chrome"
-        if binary.is_file():
-            kernels.append(
-                {
-                    "version": _engine_version(binary),
-                    "path": str(binary),
-                    "active": False,
-                    "supports": launcher.kernel_support(binary),
-                }
-            )
     return {
         "path": str(launcher.ENGINE_DIR),
         "version": kernels[0]["version"],
         "kernels": kernels,
     }
+
+
+def _check_kernel_path(data):
+    """Reject a profile kernel_path that is not an installed kernel."""
+    preferences = data.get("preference_config")
+    if not isinstance(preferences, dict):
+        return
+    raw = preferences.get("kernel_path")
+    if raw in (None, ""):
+        return
+    try:
+        chosen = str(Path(str(raw)).resolve())
+    except (OSError, ValueError):
+        chosen = ""
+    available = {str(Path(kernel["path"]).resolve()) for kernel in launcher.available_kernels()}
+    if chosen not in available:
+        raise ApiError(1000, "kernel tidak tersedia")
 
 
 @action("profile-reset-seed")
@@ -173,6 +140,7 @@ def profile_list(params):
 
 @action("profile-create")
 def profile_create(params):
+    _check_kernel_path(params)
     with store.db() as conn:
         pid = store.create_profile(conn, params)
         name = _profile_name(conn, pid)
@@ -183,6 +151,7 @@ def profile_create(params):
 @action("profile-update")
 def profile_update(params):
     pid = _pid(params)
+    _check_kernel_path(params)
     with store.db() as conn:
         _active_profile(conn, pid)
         store.update_profile(conn, pid, params)

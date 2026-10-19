@@ -89,8 +89,9 @@ useOnRefresh(() => load())
           <template v-else>Menunggu engine-info.</template>
         </p>
         <ul v-if="engine" class="kernel-list">
-          <li v-for="kernel in engine.kernels" :key="kernel.path" class="kernel-item">
+          <li v-for="kernel in engine.kernels" :key="kernel.id || kernel.path" class="kernel-item">
             <div class="kernel-line">
+              <span class="kernel-name">{{ kernel.name || kernel.id }}</span>
               <span class="kernel-version">{{ kernel.version || 'Versi tidak terbaca' }}</span>
               <span v-if="kernel.active" class="kernel-badge">Aktif</span>
             </div>
