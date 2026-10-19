@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>fp</title><pre id="o"></pre>
+<script>
+const c=document.createElement('canvas');const gl=c.getContext('webgl');
+const dbg=gl&&gl.getExtension('WEBGL_debug_renderer_info');
+const out={
+ ua:navigator.userAgent, platform:navigator.platform, cores:navigator.hardwareConcurrency,
+ mem:navigator.deviceMemory, lang:navigator.language, langs:(navigator.languages||[]).join(','),
+ tz:Intl.DateTimeFormat().resolvedOptions().timeZone, wd:navigator.webdriver,
+ glVendor:dbg?gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL):null,
+ glRenderer:dbg?gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL):null,
+ uaData: navigator.userAgentData? JSON.stringify({p:navigator.userAgentData.platform,m:navigator.userAgentData.mobile,b:navigator.userAgentData.brands}) : null,
+ dpr:window.devicePixelRatio, sw:screen.width, sh:screen.height, cd:screen.colorDepth
+};
+document.getElementById('o').textContent=JSON.stringify(out,null,1);
+</script>
