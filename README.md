@@ -57,3 +57,8 @@ Restart=on-failure
 [Install]
 WantedBy=default.target
 ```
+
+## Lisensi
+
+AGPL-3.0-only, lihat `LICENSE`. Engine fingerprint-chromium diunduh terpisah dari repo ini dan
+merupakan proyek pihak ketiga berlisensi BSD-3-clause; repositori ini tidak membundel engine.
