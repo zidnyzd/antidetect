@@ -69,6 +69,9 @@ export const api = {
   uploadExtension: (payload) => call('extension-upload', payload),
   deleteExtension: (id) => call('extension-delete', { id }),
 
+  events: (params = {}) => call('event-list', clean({ page: 1, limit: 20, ...params })),
+  clearEvents: () => call('event-clear'),
+
   health: async () => {
     const res = await fetch('/health')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)

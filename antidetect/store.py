@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS extensions (
     path TEXT,
     created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    profile_id INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_created_at ON events (created_at);
 """
 
 
@@ -276,3 +284,55 @@ def empty_recycle_bin(conn):
 def latest_seed(conn, profile_id):
     row = profile_get(conn, profile_id)
     return row["seed"] if row else None
+
+
+EVENT_LIMIT = 2000
+EVENT_GROUPS = ("profile", "proxy", "extension", "group", "tag")
+
+
+def add_event(conn, kind, message, profile_id=None):
+    conn.execute(
+        "INSERT INTO events (kind, message, profile_id, created_at) VALUES (?,?,?,?)",
+        (str(kind), str(message), None if profile_id is None else int(profile_id), now()),
+    )
+    conn.execute(
+        "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)",
+        (EVENT_LIMIT,),
+    )
+    conn.commit()
+
+
+def list_events(conn, page=1, limit=20, kind=None):
+    clauses, args = [], []
+    kind = str(kind or "").strip()
+    if kind in EVENT_GROUPS:
+        clauses.append("e.kind LIKE ?")
+        args.append(f"{kind}-%")
+    elif kind == "system":
+        for group in EVENT_GROUPS:
+            clauses.append("e.kind NOT LIKE ?")
+            args.append(f"{group}-%")
+    elif kind:
+        clauses.append("e.kind = ?")
+        args.append(kind)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    limit = max(1, int(limit))
+    page = max(1, int(page))
+    total = conn.execute(f"SELECT COUNT(*) AS c FROM events e {where}", args).fetchone()["c"]
+    rows = conn.execute(
+        f"""SELECT e.id, e.kind, e.message, e.profile_id, e.created_at,
+                   p.name AS profile_name
+            FROM events e
+            LEFT JOIN profiles p ON p.id = e.profile_id
+            {where}
+            ORDER BY e.created_at DESC, e.id DESC
+            LIMIT ? OFFSET ?""",
+        [*args, limit, (page - 1) * limit],
+    ).fetchall()
+    return total, rows
+
+
+def clear_events(conn):
+    cur = conn.execute("DELETE FROM events")
+    conn.commit()
+    return cur.rowcount

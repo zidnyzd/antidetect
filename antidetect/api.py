@@ -48,6 +48,36 @@ def _active_profile(conn, pid):
     return row
 
 
+def _event(kind, message, profile_id=None):
+    """Best-effort local operation log; never break the main action."""
+    try:
+        with store.db() as conn:
+            store.add_event(conn, kind, message, profile_id)
+    except Exception:
+        pass
+
+
+def _profile_name(conn, pid):
+    row = store.profile_get(conn, pid)
+    return row["name"] if row else f"#{pid}"
+
+
+def _proxy_label(data):
+    host = str(data.get("proxy_ip") or "").strip()
+    if host:
+        port = data.get("proxy_port")
+        return f"{host}:{port}" if port not in (None, "") else host
+    note = str(data.get("note") or "").strip()
+    if note:
+        return note
+    return f"#{data.get('id')}" if data.get("id") is not None else "tanpa alamat"
+
+
+def _event_name(name, limit=80):
+    text = " ".join(str(name or "").split()) or "tanpa nama"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 _engine_versions = {}
 _engine_versions_lock = threading.Lock()
 
@@ -115,9 +145,12 @@ def profile_reset_seed(params):
     if launcher.is_open(pid):
         raise ApiError(1004, "close the profile first")
     with store.db() as conn:
-        _active_profile(conn, pid)
+        row = _active_profile(conn, pid)
+        name = row["name"]
         store.update_profile(conn, pid, {"seed": launcher.rand_seed()})
-        return {"profile_id": pid, "seed": store.latest_seed(conn, pid)}
+        seed = store.latest_seed(conn, pid)
+    _event("profile-reset-seed", f'Seed profil "{_event_name(name)}" direset', pid)
+    return {"profile_id": pid, "seed": seed}
 
 
 @action("profile-list")
@@ -142,7 +175,9 @@ def profile_list(params):
 def profile_create(params):
     with store.db() as conn:
         pid = store.create_profile(conn, params)
-        return {"profile_id": pid, "new_profile_id": pid}
+        name = _profile_name(conn, pid)
+    _event("profile-create", f'Profil "{_event_name(name)}" dibuat', pid)
+    return {"profile_id": pid, "new_profile_id": pid}
 
 
 @action("profile-update")
@@ -151,7 +186,9 @@ def profile_update(params):
     with store.db() as conn:
         _active_profile(conn, pid)
         store.update_profile(conn, pid, params)
-        return True
+        name = conn.execute("SELECT name FROM profiles WHERE id = ?", (pid,)).fetchone()["name"]
+    _event("profile-update", f'Profil "{_event_name(name)}" diperbarui', pid)
+    return True
 
 
 @action("profile-delete")
@@ -159,9 +196,11 @@ def profile_delete(params):
     pid = _pid(params)
     launcher.close_profile(pid)
     with store.db() as conn:
-        _active_profile(conn, pid)
+        row = _active_profile(conn, pid)
+        name = row["name"]
         store.soft_delete_profile(conn, pid)
-        return True
+    _event("profile-delete", f'Profil "{_event_name(name)}" dipindahkan ke keranjang sampah', pid)
+    return True
 
 
 @action("profile-recycle-list")
@@ -182,8 +221,10 @@ def profile_restore(params):
         row = store.profile_get(conn, pid)
         if not row or not row["deleted_at"]:
             raise ApiError(1002, "profile not found")
+        name = row["name"]
         store.restore_profile(conn, pid)
-        return True
+    _event("profile-restore", f'Profil "{_event_name(name)}" dipulihkan', pid)
+    return True
 
 
 @action("profile-delete-permanent")
@@ -193,8 +234,10 @@ def profile_delete_permanent(params):
         row = store.profile_get(conn, pid)
         if not row or not row["deleted_at"]:
             raise ApiError(1002, "profile not found")
+        name = row["name"]
         store.delete_profile_permanent(conn, pid)
-        return True
+    _event("profile-delete-permanent", f'Profil "{_event_name(name)}" dihapus permanen', pid)
+    return True
 
 
 @action("profile-copy")
@@ -202,11 +245,19 @@ def profile_copy(params):
     pid = _pid(params)
     with store.db() as conn:
         row = _active_profile(conn, pid)
+        source = row["name"]
         data = store.profile_to_dict(row)
         data.pop("profile_id")
         data.pop("seed", None)
         data["name"] = params.get("name") or f"{row['name']} copy"
-        return {"profile_id": store.create_profile(conn, data)}
+        new_id = store.create_profile(conn, data)
+        new_name = _profile_name(conn, new_id)
+    _event(
+        "profile-copy",
+        f'Profil "{_event_name(source)}" disalin menjadi "{_event_name(new_name)}"',
+        new_id,
+    )
+    return {"profile_id": new_id}
 
 
 @action("profile-export")
@@ -217,6 +268,8 @@ def profile_export(params):
     except profileio.ProfileIOError as error:
         raise ApiError(1004, str(error))
     content = json.dumps(bundle, ensure_ascii=False, indent=2).encode()
+    name = bundle["profile"].get("name") or pid
+    _event("profile-export", f'Profil "{_event_name(name)}" diekspor', pid)
     return {
         "filename": profileio.export_filename(bundle["profile"].get("name")),
         "content_base64": base64.b64encode(content).decode("ascii"),
@@ -233,9 +286,15 @@ def profile_import(params):
             bundle = params.get("json")
         else:
             raise profileio.ProfileIOError("isi file profil kosong")
-        return profileio.import_profile(bundle)
+        created = profileio.import_profile(bundle)
     except profileio.ProfileIOError as error:
         raise ApiError(1000, str(error))
+    _event(
+        "profile-import",
+        f'Profil "{_event_name(created.get("name"))}" diimpor',
+        created.get("profile_id"),
+    )
+    return created
 
 
 @action("profile-open")
@@ -244,6 +303,7 @@ def profile_open(params):
     with store.db() as conn:
         row = _active_profile(conn, pid)
         profile = store.profile_to_dict(row, include_seed=True)
+        name = row["name"]
     profile["id"] = pid
     try:
         result = launcher.open_profile(profile, app_args=params.get("args"))
@@ -251,6 +311,7 @@ def profile_open(params):
         raise ApiError(1003, str(error))
     with store.db() as conn:
         store.mark_opened(conn, pid)
+    _event("profile-open", f'Profil "{_event_name(name)}" dibuka', pid)
     return result
 
 
@@ -259,6 +320,7 @@ def profile_open_random(params):
     pid = _pid(params)
     with store.db() as conn:
         row = _active_profile(conn, pid)
+        name = row["name"]
         profile = store.profile_to_dict(row, include_seed=True)
         fp = dict(profile["fingerprint_config"])
         fp.update(params.get("fingerprint_config") or {})
@@ -278,12 +340,21 @@ def profile_open_random(params):
         raise ApiError(1003, str(error))
     with store.db() as conn:
         store.mark_opened(conn, pid)
+    _event(
+        "profile-open",
+        f'Profil "{_event_name(name)}" dibuka dengan fingerprint acak',
+        pid,
+    )
     return result
 
 
 @action("profile-close")
 def profile_close(params):
-    launcher.close_profile(_pid(params))
+    pid = _pid(params)
+    launcher.close_profile(pid)
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
+    _event("profile-close", f'Profil "{_event_name(name)}" ditutup', pid)
     return True
 
 
@@ -292,8 +363,13 @@ def profile_close_batches(params):
     ids = params.get("profile_id")
     if not isinstance(ids, list):
         ids = [ids]
-    for pid in ids:
-        launcher.close_profile(int(pid))
+    closed = []
+    with store.db() as conn:
+        for pid in ids:
+            launcher.close_profile(int(pid))
+            closed.append((int(pid), _profile_name(conn, int(pid))))
+    for pid, name in closed:
+        _event("profile-close", f'Profil "{_event_name(name)}" ditutup', pid)
     return True
 
 
@@ -322,12 +398,17 @@ def profile_update_groups_batches(params):
         raise ApiError(1103, "Grup tidak ditemukan")
     group_id = int(group_id)
     with store.db() as conn:
-        if not conn.execute("SELECT 1 FROM groups WHERE id = ?", (group_id,)).fetchone():
+        group = conn.execute("SELECT title FROM groups WHERE id = ?", (group_id,)).fetchone()
+        if not group:
             raise ApiError(1103, "Grup tidak ditemukan")
         for pid in ids:
             _active_profile(conn, pid)
         for pid in ids:
             store.update_profile(conn, pid, {"group_id": group_id})
+    _event(
+        "profile-update-groups-in-batches",
+        f'{len(ids)} profil dipindahkan ke grup "{_event_name(group["title"])}"',
+    )
     return True
 
 
@@ -356,6 +437,9 @@ def profile_batch_update(params):
             _active_profile(conn, pid)
         for pid in ids:
             store.update_profile(conn, pid, data)
+    labels = {"note": "catatan", "color": "warna", "proxy_config": "proxy", "fingerprint_config": "fingerprint"}
+    fields = ", ".join(labels[key] for key in data)
+    _event("profile-batch-update", f"{len(ids)} profil diperbarui: {fields}")
     return {"updated": len(ids)}
 
 
@@ -414,19 +498,31 @@ def profile_update_cookies(params):
     pid = _known_pid(params)
     if "cookie" not in params:
         raise ApiError(1000, "cookie is required")
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
     try:
-        return cookies.update_cookies(pid, params.get("cookie"))
+        result = cookies.update_cookies(pid, params.get("cookie"))
     except cookies.CookieError as error:
         raise ApiError(1004, str(error))
+    _event("profile-update-cookies", f'Cookie profil "{_event_name(name)}" diperbarui', pid)
+    return result
 
 
 @action("profile-clear-saved-user-password")
 def profile_clear_saved_user_password(params):
     pid = _known_pid(params)
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
     try:
-        return cookies.clear_saved_passwords(pid)
+        result = cookies.clear_saved_passwords(pid)
     except cookies.CookieError as error:
         raise ApiError(1004, str(error))
+    _event(
+        "profile-clear-saved-user-password",
+        f'Password tersimpan profil "{_event_name(name)}" dihapus',
+        pid,
+    )
+    return result
 
 
 @action("profile-bookmarks")
@@ -464,23 +560,44 @@ def _clear_cache(pid, with_cookies=False):
 
 @action("profile-clear-cache")
 def profile_clear_cache(params):
-    return _clear_cache(_pid(params))
+    pid = _pid(params)
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
+    result = _clear_cache(pid)
+    _event("profile-clear-cache", f'Cache profil "{_event_name(name)}" dibersihkan', pid)
+    return result
 
 
 @action("profile-clear-cache-and-cookies")
 def profile_clear_cache_cookies(params):
-    return _clear_cache(_pid(params), with_cookies=True)
+    pid = _pid(params)
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
+    result = _clear_cache(pid, with_cookies=True)
+    _event("profile-clear-cache-and-cookies", f'Cache dan cookie profil "{_event_name(name)}" dibersihkan', pid)
+    return result
 
 
 @action("profile-clear-cache-keep-extensions")
 def profile_clear_cache_ext(params):
-    return _clear_cache(_pid(params))
+    pid = _pid(params)
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
+    result = _clear_cache(pid)
+    _event(
+        "profile-clear-cache-keep-extensions",
+        f'Cache profil "{_event_name(name)}" dibersihkan, extension dipertahankan',
+        pid,
+    )
+    return result
 
 
 @action("empty-recycle-bin")
 def empty_recycle_bin(params):
     with store.db() as conn:
-        return {"count": store.empty_recycle_bin(conn)}
+        count = store.empty_recycle_bin(conn)
+    _event("empty-recycle-bin", f"Keranjang sampah dikosongkan, {count} profil dihapus permanen")
+    return {"count": count}
 
 
 def _paginated(conn, table, page, limit):
@@ -536,7 +653,9 @@ def group_create(params):
             (title, sort, store.now()),
         )
         conn.commit()
-        return {"id": cur.lastrowid}
+        gid = cur.lastrowid
+    _event("group-create", f'Grup "{_event_name(title)}" dibuat')
+    return {"id": gid}
 
 
 @action("group-update")
@@ -569,7 +688,9 @@ def group_update(params):
             args.append(gid)
             conn.execute(f"UPDATE groups SET {', '.join(fields)} WHERE id = ?", args)
             conn.commit()
-        return True
+        title = conn.execute("SELECT title FROM groups WHERE id = ?", (gid,)).fetchone()["title"]
+    _event("group-update", f'Grup "{_event_name(title)}" diperbarui')
+    return True
 
 
 @action("group-delete")
@@ -594,7 +715,9 @@ def group_delete(params):
             )
         conn.execute("DELETE FROM groups WHERE id = ?", (gid,))
         conn.commit()
-        return True
+        title = row["title"]
+    _event("group-delete", f'Grup "{_event_name(title)}" dihapus')
+    return True
 
 
 @action("tag-list")
@@ -605,29 +728,36 @@ def tag_list(params):
 
 @action("tag-create")
 def tag_create(params):
+    title = params.get("title") or "Tag"
     with store.db() as conn:
-        cur = conn.execute("INSERT INTO tags (title) VALUES (?)", (params.get("title") or "Tag",))
+        cur = conn.execute("INSERT INTO tags (title) VALUES (?)", (title,))
         conn.commit()
-        return {"id": cur.lastrowid}
+        tid = cur.lastrowid
+    _event("tag-create", f'Tag "{_event_name(title)}" dibuat')
+    return {"id": tid}
 
 
 @action("tag-update")
 def tag_update(params):
+    tid = int(params.get("id") or 0)
+    title = params.get("title")
     with store.db() as conn:
-        conn.execute(
-            "UPDATE tags SET title = ? WHERE id = ?",
-            (params.get("title"), int(params.get("id") or 0)),
-        )
+        conn.execute("UPDATE tags SET title = ? WHERE id = ?", (title, tid))
         conn.commit()
-        return True
+    _event("tag-update", f'Tag "{_event_name(title)}" diperbarui')
+    return True
 
 
 @action("tag-delete")
 def tag_delete(params):
+    tid = int(params.get("id") or 0)
     with store.db() as conn:
-        conn.execute("DELETE FROM tags WHERE id = ?", (int(params.get("id") or 0),))
+        row = conn.execute("SELECT title FROM tags WHERE id = ?", (tid,)).fetchone()
+        title = row["title"] if row else f"#{tid}"
+        conn.execute("DELETE FROM tags WHERE id = ?", (tid,))
         conn.commit()
-        return True
+    _event("tag-delete", f'Tag "{_event_name(title)}" dihapus')
+    return True
 
 
 @action("proxy-list")
@@ -653,12 +783,18 @@ def proxy_create(params):
             ),
         )
         conn.commit()
-        return {"id": cur.lastrowid}
+        proxy_id = cur.lastrowid
+    _event("proxy-create", f'Proxy "{_event_name(_proxy_label(params))}" ditambahkan')
+    return {"id": proxy_id}
 
 
 @action("proxy-update")
 def proxy_update(params):
+    proxy_id = int(params.get("id") or 0)
     with store.db() as conn:
+        row = conn.execute("SELECT * FROM proxies WHERE id = ?", (proxy_id,)).fetchone()
+        merged = dict(row) if row else {"id": proxy_id}
+        merged.update({key: value for key, value in params.items() if value is not None})
         fields, args = [], []
         for key in ("proxy_type", "proxy_ip", "proxy_port", "proxy_user",
                     "proxy_password", "note", "tag"):
@@ -666,18 +802,23 @@ def proxy_update(params):
                 fields.append(f"{key} = ?")
                 args.append(params[key])
         if fields:
-            args.append(int(params.get("id") or 0))
+            args.append(proxy_id)
             conn.execute(f"UPDATE proxies SET {', '.join(fields)} WHERE id = ?", args)
             conn.commit()
-        return True
+    _event("proxy-update", f'Proxy "{_event_name(_proxy_label(merged))}" diperbarui')
+    return True
 
 
 @action("proxy-delete")
 def proxy_delete(params):
+    proxy_id = int(params.get("id") or 0)
     with store.db() as conn:
-        conn.execute("DELETE FROM proxies WHERE id = ?", (int(params.get("id") or 0),))
+        row = conn.execute("SELECT * FROM proxies WHERE id = ?", (proxy_id,)).fetchone()
+        label = _proxy_label(dict(row)) if row else f"#{proxy_id}"
+        conn.execute("DELETE FROM proxies WHERE id = ?", (proxy_id,))
         conn.commit()
-        return True
+    _event("proxy-delete", f'Proxy "{_event_name(label)}" dihapus')
+    return True
 
 
 @action("proxy-check")
@@ -707,9 +848,14 @@ def extension_upload(params):
     filename = params.get("filename") or params.get("file_name")
     content = params.get("content") or params.get("content_base64")
     try:
-        return extensions.upload(filename, content)
+        result = extensions.upload(filename, content)
     except extensions.ExtensionError as error:
         raise ApiError(1201, str(error))
+    _event(
+        "extension-upload",
+        f'Extension "{_event_name(result.get("title"))}" diunggah',
+    )
+    return result
 
 
 @action("extension-delete")
@@ -717,10 +863,17 @@ def extension_delete(params):
     extension_id = params.get("id", params.get("extension_id"))
     if extension_id in (None, ""):
         raise ApiError(1200, "id extension wajib diisi")
+    with store.db() as conn:
+        row = conn.execute(
+            "SELECT title FROM extensions WHERE id = ?", (int(extension_id),)
+        ).fetchone()
+        title = row["title"] if row else f"#{extension_id}"
     try:
-        return extensions.delete_extension(extension_id)
+        result = extensions.delete_extension(extension_id)
     except extensions.ExtensionError as error:
         raise ApiError(1202, str(error))
+    _event("extension-delete", f'Extension "{_event_name(title)}" dihapus')
+    return result
 
 
 @action("gateway-list")
@@ -746,6 +899,24 @@ def proxy_tag_update(params):
 @action("proxy-tag-delete")
 def proxy_tag_delete(params):
     return True
+
+
+@action("event-list")
+def event_list(params):
+    try:
+        page = max(1, int(params.get("page") or 1))
+        limit = min(2000, max(1, int(params.get("limit") or 20)))
+    except (TypeError, ValueError):
+        raise ApiError(1000, "page dan limit harus berupa bilangan bulat")
+    with store.db() as conn:
+        total, rows = store.list_events(conn, page=page, limit=limit, kind=params.get("kind"))
+        return {"total": total, "data": [dict(row) for row in rows]}
+
+
+@action("event-clear")
+def event_clear(params):
+    with store.db() as conn:
+        return {"count": store.clear_events(conn)}
 
 
 class Handler(BaseHTTPRequestHandler):

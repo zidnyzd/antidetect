@@ -1,6 +1,6 @@
 <script setup>
 import { useRoute } from 'vue-router'
-import { Box, Connection, DataBoard, Delete, Link, Monitor, Setting } from '@element-plus/icons-vue'
+import { Box, Connection, DataBoard, Delete, Link, Monitor, Setting, Tickets } from '@element-plus/icons-vue'
 
 defineProps({ collapsed: Boolean })
 
@@ -15,6 +15,7 @@ const browserItems = [
 ]
 const systemItems = [
   { path: '/api-docs', label: 'API', icon: Link },
+  { path: '/log', label: 'Log', icon: Tickets },
   { path: '/settings', label: 'Pengaturan', icon: Setting },
 ]
 

@@ -53,6 +53,7 @@ venv/bin/python scripts/selftest.py
 - [x] ekspor/impor profil (JSON), penampil bookmark dan password tersimpan
 - [x] filter tag, pilih kolom tersimpan, preset platform akun
 - [x] halaman Dasbor dan halaman API dengan contoh curl dan Selenium
+- [x] log operasi lokal dengan filter jenis, pencarian, dan bersihkan log
 - [ ] pemilihan versi kernel dan penegakan fingerprint GPU di engine
 
 ## Pemetaan fingerprint_config ke flag engine
@@ -187,6 +188,10 @@ yang tersimpan di localStorage. Dialog profil menyediakan preset platform akun
 (Facebook, TikTok, Instagram, Shopee, Tokopedia, Google, Lazada, Custom) yang
 mengisi `site_id` dan URL awal yang tetap bisa diedit.
 
+Halaman Log mencatat operasi penting (profil, proxy, extension, grup, tag,
+sistem) di database lokal, dengan filter jenis, pencarian pesan, pagination,
+dan tombol bersihkan. Cookie dan password tidak pernah ikut dicatat.
+
 ```bash
 cd ui
 npm install
@@ -200,7 +205,8 @@ profil, kelola grup, filter status dan grup, pencarian, pagination, cookie
 import/export, aksi cache, pemulihan keranjang sampah, operasi massal, cek
 proxy, pilih proxy tersimpan, atur jendela, filter tag, pilih kolom,
 ekspor/impor profil, bookmark, password tersimpan, preset platform, dasbor,
-halaman API, serta CRUD proxy. Shell desktop (Tauri/Electron) menyusul.
+halaman API, log operasi, serta CRUD proxy. Shell desktop (Tauri/Electron)
+menyusul.
 
 ## Lisensi
 

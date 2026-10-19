@@ -6,6 +6,7 @@ import Extensions from './views/Extensions.vue'
 import RecycleBin from './views/RecycleBin.vue'
 import Settings from './views/Settings.vue'
 import ApiDocs from './views/ApiDocs.vue'
+import Logs from './views/Logs.vue'
 
 export default createRouter({
   history: createWebHashHistory(),
@@ -52,6 +53,12 @@ export default createRouter({
       name: 'api-docs',
       component: ApiDocs,
       meta: { section: 'Sistem', crumb: 'API' },
+    },
+    {
+      path: '/log',
+      name: 'logs',
+      component: Logs,
+      meta: { section: 'Sistem', crumb: 'Log' },
     },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],

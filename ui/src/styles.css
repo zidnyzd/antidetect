@@ -469,6 +469,10 @@ button {
   width: 160px;
 }
 
+.kind-select {
+  width: 150px;
+}
+
 .column-picker {
   display: flex;
   flex-direction: column;
@@ -878,6 +882,81 @@ button {
 .pagination .el-pagination__jump {
   color: var(--ix-text-secondary);
   font-size: 13px;
+}
+
+/* Log */
+
+.logs-page .toolbar-left {
+  gap: 12px;
+}
+
+.log-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ix-muted);
+}
+
+.log-table .log-profile {
+  display: block;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-table .log-profile.is-empty {
+  font-weight: 400;
+  color: var(--ix-muted);
+}
+
+.log-message {
+  display: block;
+  color: var(--ix-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.log-badge.is-profile {
+  background: #e8f0fe;
+  color: #1e5fd6;
+}
+
+.log-badge.is-proxy {
+  background: #e6f7f3;
+  color: #0f766e;
+}
+
+.log-badge.is-extension {
+  background: #f1ebfd;
+  color: #6d28d9;
+}
+
+.log-badge.is-group {
+  background: #fdf3e2;
+  color: #a15c05;
+}
+
+.log-badge.is-tag {
+  background: #eef0f3;
+  color: #4e5969;
+}
+
+.log-badge.is-system {
+  background: #eef0f3;
+  color: #5b6472;
 }
 
 /* Group manager */
@@ -1857,6 +1936,10 @@ button {
   }
 
   .breadcrumb .crumb-sep {
+    display: none;
+  }
+
+  .log-hint {
     display: none;
   }
 
