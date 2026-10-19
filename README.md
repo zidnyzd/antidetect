@@ -44,6 +44,8 @@ venv/bin/python scripts/selftest.py
   cache simpan extension, hapus password tersimpan)
 - [x] keranjang sampah: hapus jadi soft delete, pulihkan, hapus permanen,
   kosongkan keranjang
+- [x] operasi massal (buka/tutup, ubah grup, catatan, proxy, platform),
+  cek proxy dengan IP dan latensi, pilih proxy tersimpan, atur jendela
 - [ ] kelola extension lokal dan pemilihan per profil
 - [ ] fingerprint lanjutan dan pilih versi kernel
 
@@ -151,6 +153,11 @@ password tersimpan. Hapus profil memindahkannya ke halaman Keranjang Sampah;
 dari sana profil bisa dipulihkan, dihapus permanen, atau dikosongkan
 sekaligus.
 
+Centang beberapa profil untuk membuka/menutup, memindahkan grup, mengubah
+catatan/proxy/platform, atau menghapus sekaligus. Tombol Atur Jendela menata
+jendela profil yang terbuka. Halaman Proxy punya tombol Tes yang menampilkan IP
+keluar dan latensi; dialog profil bisa mengisi konfigurasi dari proxy tersimpan.
+
 ```bash
 cd ui
 npm install
@@ -161,8 +168,9 @@ npm run build      # hasil produksi ke ui/dist
 Butuh Node.js 18+. Alur yang sudah diuji lewat UI: buat, edit, duplikat, hapus
 ke keranjang, buka/tutup profil dengan timestamp terakhir dibuka, tag per
 profil, kelola grup, filter status dan grup, pencarian, pagination, cookie
-import/export, aksi cache, pemulihan keranjang sampah, serta CRUD proxy. Shell
-desktop (Tauri/Electron) menyusul.
+import/export, aksi cache, pemulihan keranjang sampah, operasi massal, cek
+proxy, pilih proxy tersimpan, atur jendela, serta CRUD proxy. Shell desktop
+(Tauri/Electron) menyusul.
 
 ## Lisensi
 

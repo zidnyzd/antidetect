@@ -3,7 +3,7 @@ import json
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import cookies, launcher, store
+from . import cookies, launcher, proxycheck, store
 
 ACTIONS = {}
 
@@ -180,9 +180,76 @@ def profile_close_batches(params):
     return True
 
 
+def _id_list(params):
+    ids = params.get("profile_id")
+    if not isinstance(ids, list):
+        ids = [ids]
+    result = []
+    for item in ids:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            raise ApiError(1000, "profile_id harus berupa daftar id")
+        if value not in result:
+            result.append(value)
+    if not result:
+        raise ApiError(1000, "profile_id tidak boleh kosong")
+    return result
+
+
+@action("profile-update-groups-in-batches")
+def profile_update_groups_batches(params):
+    ids = _id_list(params)
+    group_id = params.get("group_id")
+    if group_id in (None, ""):
+        raise ApiError(1103, "Grup tidak ditemukan")
+    group_id = int(group_id)
+    with store.db() as conn:
+        if not conn.execute("SELECT 1 FROM groups WHERE id = ?", (group_id,)).fetchone():
+            raise ApiError(1103, "Grup tidak ditemukan")
+        for pid in ids:
+            _active_profile(conn, pid)
+        for pid in ids:
+            store.update_profile(conn, pid, {"group_id": group_id})
+    return True
+
+
+BATCH_FIELDS = ("note", "color", "proxy_config", "fingerprint_config")
+
+
+@action("profile-batch-update")
+def profile_batch_update(params):
+    ids = _id_list(params)
+    data = {}
+    if "note" in params:
+        note = params.get("note")
+        data["note"] = None if note is None else str(note)
+    if "color" in params:
+        data["color"] = params.get("color")
+    for key in ("proxy_config", "fingerprint_config"):
+        if key in params:
+            value = params.get(key)
+            if not isinstance(value, dict):
+                raise ApiError(1000, f"{key} harus berupa objek")
+            data[key] = value
+    if not data:
+        raise ApiError(1000, f"Tidak ada field untuk diubah, pilih salah satu dari {', '.join(BATCH_FIELDS)}")
+    with store.db() as conn:
+        for pid in ids:
+            _active_profile(conn, pid)
+        for pid in ids:
+            store.update_profile(conn, pid, data)
+    return {"updated": len(ids)}
+
+
 @action("profile-opened-list")
 def profile_opened_list(params):
     return launcher.opened_profiles()
+
+
+@action("profile-opened-list-arrange-tile")
+def profile_opened_list_arrange_tile(params):
+    return launcher.arrange_opened_profiles(params)
 
 
 @action("native-client-profile-opened-list")
@@ -476,6 +543,11 @@ def proxy_delete(params):
         conn.execute("DELETE FROM proxies WHERE id = ?", (int(params.get("id") or 0),))
         conn.commit()
         return True
+
+
+@action("proxy-check")
+def proxy_check(params):
+    return proxycheck.check_proxy(params)
 
 
 @action("traffic-package-list")

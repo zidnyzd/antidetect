@@ -27,9 +27,14 @@ const TIMEZONES = [
 const LANGUAGES = ['id-ID', 'en-US', 'en-GB', 'zh-CN', 'ja-JP', 'ko-KR', 'es-ES']
 const CPU_CORES = [2, 4, 6, 8, 12, 16]
 const MEMORY = [2, 4, 8]
+const WINDOWS_VERSIONS = ['11', '10', '8.1', '7']
+const MACOS_VERSIONS = ['14', '13', '12']
 
 const activeTab = ref('account')
 const busy = ref(false)
+const savedProxies = ref([])
+const savedProxyId = ref(null)
+const proxyCheck = reactive({ loading: false, ok: null, text: '' })
 const errors = reactive({ name: '', group_id: '', proxy_ip: '', proxy_port: '', site_url: '' })
 
 let initialPayload = null
@@ -66,6 +71,13 @@ const colorOptions = computed(() => {
   if (custom && !colors.includes(custom)) colors.push(custom)
   return colors
 })
+const versionOptions = computed(() =>
+  form.platform === 'Macos' ? MACOS_VERSIONS : WINDOWS_VERSIONS
+)
+const versionLabel = computed(() => (form.platform === 'Macos' ? 'Versi macOS' : 'Versi Windows'))
+const savedProxyPlaceholder = computed(() =>
+  savedProxies.value.length ? 'Manual / isi sendiri' : 'Belum ada proxy tersimpan'
+)
 
 function proxyTypeValue(raw) {
   const value = String(raw || 'direct').toLowerCase()
@@ -87,9 +99,10 @@ function fillFromProfile(profile) {
   form.proxy_user = proxy.proxy_user || ''
   form.proxy_password = proxy.proxy_password || ''
   form.platform = fingerprint.platform === 'Macos' ? 'Macos' : 'Windows'
-  form.system_version = ['11', '10'].includes(String(fingerprint.system_version))
+  const versions = form.platform === 'Macos' ? MACOS_VERSIONS : WINDOWS_VERSIONS
+  form.system_version = versions.includes(String(fingerprint.system_version))
     ? String(fingerprint.system_version)
-    : '11'
+    : versions[0]
   form.hardware_concurrency = CPU_CORES.includes(Number(fingerprint.hardware_concurrency))
     ? Number(fingerprint.hardware_concurrency)
     : 8
@@ -104,6 +117,10 @@ function clearErrors() {
 
 function resetForm() {
   Object.assign(form, emptyForm())
+  savedProxyId.value = null
+  proxyCheck.loading = false
+  proxyCheck.ok = null
+  proxyCheck.text = ''
   clearErrors()
   activeTab.value = 'account'
   if (props.profile) {
@@ -114,10 +131,31 @@ function resetForm() {
   }
 }
 
+async function loadSavedProxies() {
+  try {
+    const result = await api.proxies({ limit: 100 })
+    savedProxies.value = result.data || []
+  } catch (error) {
+    savedProxies.value = []
+    ElMessage.error(`Gagal memuat proxy tersimpan: ${error.message}`)
+  }
+}
+
 watch(
   () => props.modelValue,
   (open) => {
-    if (open) resetForm()
+    if (open) {
+      resetForm()
+      loadSavedProxies()
+    }
+  }
+)
+
+watch(
+  () => form.platform,
+  (platform) => {
+    const versions = platform === 'Macos' ? MACOS_VERSIONS : WINDOWS_VERSIONS
+    if (!versions.includes(form.system_version)) form.system_version = versions[0]
   }
 )
 
@@ -162,15 +200,14 @@ function validateForm() {
 }
 
 function fingerprintPayload() {
-  const config = {
+  return {
     platform: form.platform,
+    system_version: form.system_version,
     hardware_concurrency: Number(form.hardware_concurrency),
     device_memory: Number(form.device_memory),
     timezone: form.timezone,
     language: form.language,
   }
-  if (form.platform === 'Windows') config.system_version = form.system_version
-  return config
 }
 
 function proxyPayload() {
@@ -281,6 +318,77 @@ function clearProxyErrors() {
   errors.proxy_ip = ''
   errors.proxy_port = ''
 }
+
+function clearProxyCheck() {
+  proxyCheck.ok = null
+  proxyCheck.text = ''
+}
+
+function proxyLabel(proxy) {
+  const type = String(proxy.proxy_type || '').toUpperCase() || '-'
+  const note = proxy.note ? ` · ${proxy.note}` : ''
+  return `${type} ${proxy.proxy_ip || '-'}:${proxy.proxy_port ?? '-'}${note}`
+}
+
+function onSavedProxyChange(value) {
+  clearProxyCheck()
+  clearProxyErrors()
+  const proxy = savedProxies.value.find((item) => item.id === value)
+  if (!proxy) return
+  form.proxy_type = proxyTypeValue(proxy.proxy_type)
+  form.proxy_ip = proxy.proxy_ip || ''
+  form.proxy_port = proxy.proxy_port ?? null
+  form.proxy_user = proxy.proxy_user || ''
+  form.proxy_password = proxy.proxy_password || ''
+}
+
+function proxyFormValid() {
+  clearProxyErrors()
+  if (form.proxy_type === 'direct') return true
+  let valid = true
+  if (!form.proxy_ip.trim()) {
+    errors.proxy_ip = 'Host wajib diisi'
+    valid = false
+  }
+  const port = Number(form.proxy_port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    errors.proxy_port = 'Port harus 1 sampai 65535'
+    valid = false
+  }
+  return valid
+}
+
+async function testProxy() {
+  if (!proxyFormValid()) return
+  proxyCheck.loading = true
+  proxyCheck.ok = null
+  proxyCheck.text = ''
+  try {
+    const payload =
+      form.proxy_type === 'direct'
+        ? { proxy_type: 'direct' }
+        : {
+            proxy_type: form.proxy_type,
+            proxy_ip: form.proxy_ip.trim(),
+            proxy_port: Number(form.proxy_port),
+            proxy_user: form.proxy_user.trim() || null,
+            proxy_password: form.proxy_password || null,
+          }
+    const result = await api.checkProxy(payload)
+    if (result?.ok) {
+      proxyCheck.ok = true
+      proxyCheck.text = `${result.ip} · ${result.latency_ms} ms`
+    } else {
+      proxyCheck.ok = false
+      proxyCheck.text = result?.error || 'Cek proxy gagal'
+    }
+  } catch (error) {
+    proxyCheck.ok = false
+    proxyCheck.text = error.message
+  } finally {
+    proxyCheck.loading = false
+  }
+}
 </script>
 
 <template>
@@ -325,8 +433,25 @@ function clearProxyErrors() {
 
       <el-tab-pane label="Konfigurasi Proxy" name="proxy">
         <el-form label-width="150px" label-position="right" class="dialog-form" @submit.prevent>
+          <el-form-item label="Proxy Tersimpan">
+            <el-select
+              v-model="savedProxyId"
+              :placeholder="savedProxyPlaceholder"
+              clearable
+              class="field-260"
+              @change="onSavedProxyChange"
+            >
+              <el-option v-if="savedProxies.length" label="Manual / isi sendiri" :value="0" />
+              <el-option
+                v-for="proxy in savedProxies"
+                :key="proxy.id"
+                :label="proxyLabel(proxy)"
+                :value="proxy.id"
+              />
+            </el-select>
+          </el-form-item>
           <el-form-item label="Tipe Proxy">
-            <el-radio-group v-model="form.proxy_type" @change="clearProxyErrors">
+            <el-radio-group v-model="form.proxy_type" @change="clearProxyErrors(); clearProxyCheck()">
               <el-radio value="direct">Direct</el-radio>
               <el-radio value="http">HTTP</el-radio>
               <el-radio value="https">HTTPS</el-radio>
@@ -335,7 +460,11 @@ function clearProxyErrors() {
           </el-form-item>
           <template v-if="form.proxy_type !== 'direct'">
             <el-form-item label="Host" required :error="errors.proxy_ip">
-              <el-input v-model="form.proxy_ip" placeholder="203.0.113.10" @input="errors.proxy_ip = ''" />
+              <el-input
+                v-model="form.proxy_ip"
+                placeholder="203.0.113.10"
+                @input="errors.proxy_ip = ''; clearProxyCheck()"
+              />
             </el-form-item>
             <el-form-item label="Port" required :error="errors.proxy_port">
               <el-input
@@ -345,17 +474,32 @@ function clearProxyErrors() {
                 max="65535"
                 class="field-180"
                 placeholder="8080"
-                @input="errors.proxy_port = ''"
+                @input="errors.proxy_port = ''; clearProxyCheck()"
               />
             </el-form-item>
             <el-form-item label="Username">
-              <el-input v-model="form.proxy_user" placeholder="opsional" />
+              <el-input v-model="form.proxy_user" placeholder="opsional" @input="clearProxyCheck" />
             </el-form-item>
             <el-form-item label="Password">
-              <el-input v-model="form.proxy_password" type="password" show-password placeholder="opsional" />
+              <el-input
+                v-model="form.proxy_password"
+                type="password"
+                show-password
+                placeholder="opsional"
+                @input="clearProxyCheck"
+              />
             </el-form-item>
           </template>
-          <p class="form-hint">Kredensial proxy dipakai engine saat profil dibuka.</p>
+          <el-form-item label="Tes Koneksi">
+            <div class="proxy-check-cell">
+              <el-button size="small" :loading="proxyCheck.loading" @click="testProxy">Tes</el-button>
+              <span
+                v-if="proxyCheck.text"
+                :class="['proxy-check-result', proxyCheck.ok ? 'is-ok' : 'is-fail']"
+              >{{ proxyCheck.text }}</span>
+            </div>
+          </el-form-item>
+          <p class="form-hint">Kredensial proxy dipakai engine saat profil dibuka. Pilih proxy tersimpan untuk mengisi isian, nilai tetap disimpan di profil ini.</p>
         </el-form>
       </el-tab-pane>
 
@@ -367,10 +511,9 @@ function clearProxyErrors() {
               <el-radio value="Macos">macOS</el-radio>
             </el-radio-group>
           </el-form-item>
-          <el-form-item v-if="form.platform === 'Windows'" label="Versi Windows">
+          <el-form-item :label="versionLabel">
             <el-radio-group v-model="form.system_version">
-              <el-radio value="11">Windows 11</el-radio>
-              <el-radio value="10">Windows 10</el-radio>
+              <el-radio v-for="version in versionOptions" :key="version" :value="version">{{ version }}</el-radio>
             </el-radio-group>
           </el-form-item>
           <el-form-item label="CPU Cores">

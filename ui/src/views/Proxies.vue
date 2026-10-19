@@ -28,6 +28,51 @@ const form = reactive({
 
 const isEdit = computed(() => !!editing.value)
 const title = computed(() => (isEdit.value ? 'Edit Proxy' : 'Tambah Proxy'))
+const checks = reactive({})
+const dialogCheck = reactive({ loading: false, ok: null, text: '' })
+
+function applyCheck(target, result) {
+  if (result?.ok) {
+    target.ok = true
+    target.text = `${result.ip} · ${result.latency_ms} ms`
+  } else {
+    target.ok = false
+    target.text = result?.error || 'Cek proxy gagal'
+  }
+}
+
+async function checkRow(row) {
+  checks[row.id] = { loading: true, ok: null, text: '' }
+  try {
+    const result = await api.checkProxy({ proxy_id: row.id })
+    checks[row.id] = { loading: false }
+    applyCheck(checks[row.id], result)
+  } catch (error) {
+    checks[row.id] = { loading: false, ok: false, text: error.message }
+  }
+}
+
+async function testConnection() {
+  if (!validate()) return
+  dialogCheck.loading = true
+  dialogCheck.ok = null
+  dialogCheck.text = ''
+  try {
+    const result = await api.checkProxy({
+      proxy_type: form.proxy_type,
+      proxy_ip: form.proxy_ip.trim(),
+      proxy_port: Number(form.proxy_port),
+      proxy_user: form.proxy_user.trim() || null,
+      proxy_password: form.proxy_password || null,
+    })
+    applyCheck(dialogCheck, result)
+  } catch (error) {
+    dialogCheck.ok = false
+    dialogCheck.text = error.message
+  } finally {
+    dialogCheck.loading = false
+  }
+}
 
 async function load() {
   loading.value = true
@@ -57,6 +102,9 @@ function openCreate() {
     proxy_password: '',
     note: '',
   })
+  dialogCheck.loading = false
+  dialogCheck.ok = null
+  dialogCheck.text = ''
   clearErrors()
   dialogVisible.value = true
 }
@@ -72,6 +120,9 @@ function openEdit(row) {
     proxy_password: row.proxy_password || '',
     note: row.note || '',
   })
+  dialogCheck.loading = false
+  dialogCheck.ok = null
+  dialogCheck.text = ''
   clearErrors()
   dialogVisible.value = true
 }
@@ -201,6 +252,18 @@ useOnRefresh(() => load())
             <span class="cell-sub" :title="row.note || ''">{{ row.note || 'Tanpa catatan' }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="Status" width="250">
+          <template #default="{ row }">
+            <div class="proxy-check-cell">
+              <el-button size="small" :loading="checks[row.id]?.loading" @click="checkRow(row)">Tes</el-button>
+              <span
+                v-if="checks[row.id]?.text"
+                :class="['proxy-check-result', checks[row.id].ok ? 'is-ok' : 'is-fail']"
+                :title="checks[row.id].text"
+              >{{ checks[row.id].text }}</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="Operasi" width="120" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
@@ -277,6 +340,15 @@ useOnRefresh(() => load())
         </el-form-item>
         <el-form-item label="Password">
           <el-input v-model="form.proxy_password" type="password" show-password placeholder="opsional" />
+        </el-form-item>
+        <el-form-item label="Tes Koneksi">
+          <div class="proxy-check-cell">
+            <el-button size="small" :loading="dialogCheck.loading" @click="testConnection">Tes Koneksi</el-button>
+            <span
+              v-if="dialogCheck.text"
+              :class="['proxy-check-result', dialogCheck.ok ? 'is-ok' : 'is-fail']"
+            >{{ dialogCheck.text }}</span>
+          </div>
         </el-form-item>
         <el-form-item label="Catatan">
           <el-input v-model="form.note" type="textarea" :rows="3" maxlength="200" show-word-limit placeholder="opsional" />

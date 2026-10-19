@@ -750,6 +750,29 @@ button {
   color: var(--ix-danger);
 }
 
+.proxy-check-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.proxy-check-result {
+  font-size: 12px;
+  line-height: 18px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.proxy-check-result.is-ok {
+  color: var(--ix-success);
+}
+
+.proxy-check-result.is-fail {
+  color: var(--ix-danger);
+}
+
 .table-empty {
   padding: 48px 16px;
   text-align: center;
@@ -918,6 +941,11 @@ button {
 
 .el-dialog__body {
   padding: 0;
+}
+
+.proxy-dialog .el-dialog__body,
+.bulk-edit-dialog .el-dialog__body {
+  padding: 20px 24px 4px;
 }
 
 .el-dialog__footer {

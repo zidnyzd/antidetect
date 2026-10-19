@@ -80,29 +80,34 @@ def _gost_binary():
     raise LaunchError("gost tidak ditemukan, jalankan scripts/fetch-gost.sh dulu")
 
 
-def _start_gost(profile_id, spec):
-    """Bridge an authenticated upstream proxy for a Chromium that cannot do proxy auth."""
+def start_proxy_bridge(spec, log_dir=None, local_scheme=None, timeout=10):
+    """Bridge an upstream proxy through a local gost hop.
+
+    Chromium cannot send proxy credentials; urllib needs a plain local proxy
+    for SOCKS5 and authenticated upstreams. ``local_scheme`` defaults to the
+    upstream scheme (socks5 stays socks5), callers that speak HTTP can force it.
+    """
     binary = _gost_binary()
     local_port = _free_port()
-    # Chromium only speaks plain http/https/socks to a local proxy; TLS to an
-    # upstream HTTPS proxy is gost's job. https upstreams use a local http hop.
-    local_scheme = "socks5" if spec["scheme"] == "socks5" else "http"
-    credentials = quote(spec["user"], safe="")
-    if spec["password"]:
-        credentials += ":" + quote(spec["password"], safe="")
+    if local_scheme is None:
+        local_scheme = "socks5" if spec["scheme"] == "socks5" else "http"
+    credentials = quote(str(spec.get("user") or ""), safe="")
+    if spec.get("password"):
+        credentials += ":" + quote(str(spec["password"]), safe="")
     if credentials:
         credentials += "@"
     upstream = f"{spec['scheme']}://{credentials}{spec['host']}:{spec['port']}"
-    log_path = PROFILES_DIR / str(profile_id) / "gost.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = open(log_path, "ab")
-    proc = subprocess.Popen(
-        [str(binary), "-L", f"{local_scheme}://127.0.0.1:{local_port}", "-F", upstream],
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    deadline = time.time() + 10
+    log_dir = Path(log_dir or PROFILES_DIR / "_gost")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "gost.log"
+    with open(log_path, "ab") as log:
+        proc = subprocess.Popen(
+            [str(binary), "-L", f"{local_scheme}://127.0.0.1:{local_port}", "-F", upstream],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    deadline = time.time() + max(0.5, float(timeout))
     while time.time() < deadline:
         if proc.poll() is not None:
             _kill_pgid(proc.pid)
@@ -114,6 +119,15 @@ def _start_gost(profile_id, spec):
             time.sleep(0.1)
     _kill_pgid(proc.pid)
     raise LaunchError(f"gost tidak mendengarkan di 127.0.0.1:{local_port}")
+
+
+def _start_gost(profile_id, spec):
+    return start_proxy_bridge(spec, PROFILES_DIR / str(profile_id))
+
+
+def stop_proxy_bridge(proc):
+    if proc is not None and proc.poll() is None:
+        _kill_pgid(proc.pid, timeout=5.0)
 
 
 def build_args(profile, port, app_args=None, proxy_arg=None):
@@ -329,6 +343,77 @@ def close_profile(profile_id):
 
 def opened_profiles():
     return [entry["info"] for entry in _open.values()]
+
+
+def _arrange_number(params, key, default, minimum=None):
+    value = params.get(key)
+    if value in (None, ""):
+        return default
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None and number < minimum:
+        return minimum
+    return number
+
+
+def _window_ids(pid):
+    try:
+        found = subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--pid", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in found.stdout.splitlines() if line.strip()]
+
+
+def _move_window(window_id, x, y, width, height):
+    try:
+        moved = subprocess.run(
+            ["wmctrl", "-i", "-r", window_id, "-e", f"0,{x},{y},{width},{height}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return moved.returncode == 0
+
+
+def arrange_opened_profiles(params=None):
+    """Tile open profile windows with wmctrl. A profile counts once when a
+    visible window of its Chrome pid accepts the geometry change."""
+    params = params or {}
+    per_line = _arrange_number(params, "per_line_number_of_profiles", 3, 1)
+    width = _arrange_number(params, "profile_size_width", 960, 1)
+    height = _arrange_number(params, "profile_size_hight", 540, 1)
+    spacing_h = _arrange_number(params, "profile_spacing_horizontal", 8, 0)
+    spacing_v = _arrange_number(params, "profile_spacing_vertical", 8, 0)
+    start_x = _arrange_number(params, "starting_position_x", 0)
+    start_y = _arrange_number(params, "starting_position_y", 0)
+    deviation_x = _arrange_number(params, "profile_deviaton_x", 0)
+    deviation_y = _arrange_number(params, "profile_deviaton_y", 0)
+
+    arranged = 0
+    for index, info in enumerate(opened_profiles()):
+        pid = int(info.get("pid") or 0)
+        if pid <= 0:
+            continue
+        window_ids = _window_ids(pid)
+        if not window_ids:
+            continue
+        row, column = divmod(index, per_line)
+        x = start_x + column * (width + spacing_h + deviation_x)
+        y = start_y + row * (height + spacing_v + deviation_y)
+        for window_id in window_ids:
+            if _move_window(window_id, x, y, width, height):
+                arranged += 1
+                break
+    return {"arranged": arranged}
 
 
 def is_open(profile_id):

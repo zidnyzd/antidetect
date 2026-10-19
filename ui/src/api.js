@@ -36,6 +36,10 @@ export const api = {
   closeProfile: (profileId) => call('profile-close', { profile_id: profileId }),
   closeProfiles: (ids) => call('profile-close-in-batches', { profile_id: [...ids] }),
   openedList: () => call('profile-opened-list'),
+  updateGroupsInBatches: (ids, groupId) =>
+    call('profile-update-groups-in-batches', { profile_id: [...ids], group_id: groupId }),
+  batchUpdate: (ids, fields) => call('profile-batch-update', { profile_id: [...ids], ...fields }),
+  arrangeTile: (payload = {}) => call('profile-opened-list-arrange-tile', payload),
   getCookies: (profileId) => call('profile-get-cookies', { profile_id: profileId }),
   updateCookies: (profileId, cookie) => call('profile-update-cookies', { profile_id: profileId, cookie }),
   clearCache: (profileId) => call('profile-clear-cache', { profile_id: profileId }),
@@ -53,6 +57,7 @@ export const api = {
   createProxy: (proxy) => call('proxy-create', proxy),
   updateProxy: (proxy) => call('proxy-update', proxy),
   deleteProxy: (id) => call('proxy-delete', { id }),
+  checkProxy: (payload = {}) => call('proxy-check', payload),
 
   health: async () => {
     const res = await fetch('/health')

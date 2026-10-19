@@ -1,7 +1,7 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Brush, CopyDocument, Delete, Edit, Files, FolderOpened, Key, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { ArrowDown, Brush, CopyDocument, Delete, Edit, Files, FolderOpened, Grid, Key, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
 import ProfileDialog from '../components/ProfileDialog.vue'
@@ -32,6 +32,29 @@ const openAfterSave = ref(false)
 const groupManagerVisible = ref(false)
 const cookieVisible = ref(false)
 const cookieProfile = ref(null)
+const bulkKind = ref('')
+const bulkVisible = ref(false)
+const arrangeBusy = ref(false)
+
+const PLATFORM_VERSIONS = {
+  Windows: ['11', '10', '8.1', '7'],
+  Macos: ['14', '13', '12'],
+}
+const BULK_TITLES = { group: 'Ubah Grup', proxy: 'Ubah Proxy', platform: 'Ubah Platform' }
+
+const bulkForm = reactive({
+  group_id: null,
+  proxy_type: 'direct',
+  proxy_ip: '',
+  proxy_port: null,
+  proxy_user: '',
+  proxy_password: '',
+  platform: 'Windows',
+  system_version: '11',
+})
+const bulkErrors = reactive({ proxy_ip: '', proxy_port: '' })
+const bulkVersionOptions = computed(() => PLATFORM_VERSIONS[bulkForm.platform] || [])
+const bulkTitle = computed(() => BULK_TITLES[bulkKind.value] || 'Operasi Massal')
 
 const DATA_ACTIONS = {
   'clear-cache': {
@@ -192,6 +215,14 @@ watch(statusFilter, () => {
   clearSelection()
   loadProfiles()
 })
+
+watch(
+  () => bulkForm.platform,
+  (platform) => {
+    const versions = PLATFORM_VERSIONS[platform] || []
+    if (!versions.includes(bulkForm.system_version)) bulkForm.system_version = versions[0] || ''
+  }
+)
 
 watch(displayTotal, (value) => {
   const maxPage = Math.max(1, Math.ceil(value / limit.value))
@@ -360,6 +391,58 @@ async function runBulk(command) {
   const chosen = [...selected.value]
   if (!chosen.length) return
 
+  if (command === 'note') {
+    let result
+    try {
+      result = await ElMessageBox.prompt(
+        `Ubah catatan ${chosen.length} profil terpilih. Kosongkan isian untuk menghapus catatan.`,
+        'Ubah Catatan',
+        {
+          confirmButtonText: 'Simpan',
+          cancelButtonText: 'Batal',
+          inputType: 'textarea',
+          inputPlaceholder: 'Catatan baru',
+        }
+      )
+    } catch {
+      return
+    }
+    const note = String(result.value || '').trim()
+    bulkBusy.value = true
+    try {
+      await api.batchUpdate(
+        chosen.map((profile) => profile.profile_id),
+        { note: note || null }
+      )
+      await loadProfiles()
+      clearSelection()
+      ElMessage.success(
+        note ? `${chosen.length} catatan profil diperbarui` : `${chosen.length} catatan profil dihapus`
+      )
+    } catch (error) {
+      ElMessage.error(`Gagal mengubah catatan: ${error.message}`)
+    } finally {
+      bulkBusy.value = false
+    }
+    return
+  }
+
+  if (command === 'group' || command === 'proxy' || command === 'platform') {
+    bulkErrors.proxy_ip = ''
+    bulkErrors.proxy_port = ''
+    bulkForm.group_id = groups.value[0]?.id ?? null
+    bulkForm.proxy_type = 'direct'
+    bulkForm.proxy_ip = ''
+    bulkForm.proxy_port = null
+    bulkForm.proxy_user = ''
+    bulkForm.proxy_password = ''
+    bulkForm.platform = 'Windows'
+    bulkForm.system_version = '11'
+    bulkKind.value = command
+    bulkVisible.value = true
+    return
+  }
+
   if (command === 'delete') {
     try {
       await ElMessageBox.confirm(
@@ -443,6 +526,78 @@ async function runBulk(command) {
       clearSelection()
       await pollOpened()
     }
+  }
+}
+
+async function submitBulkEdit() {
+  const ids = selectedIds.value
+  if (!ids.length) return
+  bulkErrors.proxy_ip = ''
+  bulkErrors.proxy_port = ''
+
+  let payload = null
+  let message = ''
+  if (bulkKind.value === 'group') {
+    if (!bulkForm.group_id) {
+      ElMessage.warning('Pilih grup tujuan')
+      return
+    }
+    payload = () => api.updateGroupsInBatches(ids, bulkForm.group_id)
+    message = `${ids.length} profil dipindahkan ke ${groupTitle(bulkForm.group_id)}`
+  } else if (bulkKind.value === 'proxy') {
+    let proxy = { proxy_type: 'direct' }
+    if (bulkForm.proxy_type !== 'direct') {
+      if (!bulkForm.proxy_ip.trim()) bulkErrors.proxy_ip = 'Host wajib diisi'
+      const port = Number(bulkForm.proxy_port)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        bulkErrors.proxy_port = 'Port harus 1 sampai 65535'
+      }
+      if (bulkErrors.proxy_ip || bulkErrors.proxy_port) return
+      proxy = {
+        proxy_type: bulkForm.proxy_type,
+        proxy_ip: bulkForm.proxy_ip.trim(),
+        proxy_port: port,
+        proxy_user: bulkForm.proxy_user.trim() || null,
+        proxy_password: bulkForm.proxy_password || null,
+      }
+    }
+    payload = () => api.batchUpdate(ids, { proxy_config: proxy })
+    message = `${ids.length} proxy profil diperbarui`
+  } else if (bulkKind.value === 'platform') {
+    payload = () =>
+      api.batchUpdate(ids, {
+        fingerprint_config: {
+          platform: bulkForm.platform,
+          system_version: bulkForm.system_version,
+        },
+      })
+    message = `${ids.length} platform profil diperbarui`
+  }
+
+  if (!payload) return
+  bulkBusy.value = true
+  try {
+    await payload()
+    bulkVisible.value = false
+    clearSelection()
+    await loadProfiles()
+    ElMessage.success(message)
+  } catch (error) {
+    ElMessage.error(`Gagal mengubah profil: ${error.message}`)
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
+async function arrangeWindows() {
+  arrangeBusy.value = true
+  try {
+    const result = await api.arrangeTile()
+    ElMessage.success(`${result?.arranged ?? 0} jendela diatur`)
+  } catch (error) {
+    ElMessage.error(`Gagal mengatur jendela: ${error.message}`)
+  } finally {
+    arrangeBusy.value = false
   }
 }
 
@@ -610,6 +765,10 @@ useOnRefresh(() => refreshAll())
                 <el-dropdown-menu>
                   <el-dropdown-item command="open">Buka terpilih</el-dropdown-item>
                   <el-dropdown-item command="close">Tutup terpilih</el-dropdown-item>
+                  <el-dropdown-item command="group" divided>Ubah Grup</el-dropdown-item>
+                  <el-dropdown-item command="note">Ubah Catatan</el-dropdown-item>
+                  <el-dropdown-item command="proxy">Ubah Proxy</el-dropdown-item>
+                  <el-dropdown-item command="platform">Ubah Platform</el-dropdown-item>
                   <el-dropdown-item command="delete" divided>Hapus terpilih</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -621,6 +780,12 @@ useOnRefresh(() => refreshAll())
             </el-radio-group>
           </div>
           <div class="toolbar-right">
+            <el-button
+              v-if="opened.size"
+              :icon="Grid"
+              :loading="arrangeBusy"
+              @click="arrangeWindows"
+            >Atur Jendela</el-button>
             <span v-if="selectedIds.length" class="selection-count">{{ selectedIds.length }} dipilih</span>
           </div>
         </div>
@@ -795,5 +960,82 @@ useOnRefresh(() => refreshAll())
       :profile="cookieProfile"
       :profile-open="cookieProfile ? isOpen(cookieProfile) : false"
     />
+
+    <el-dialog
+      v-model="bulkVisible"
+      :title="bulkTitle"
+      width="460px"
+      top="12vh"
+      :close-on-click-modal="false"
+      class="bulk-edit-dialog"
+    >
+      <el-form label-width="120px" label-position="right" class="dialog-form bulk-form" @submit.prevent>
+        <template v-if="bulkKind === 'group'">
+          <el-form-item label="Grup Tujuan" required>
+            <el-select v-model="bulkForm.group_id" placeholder="Pilih grup">
+              <el-option v-for="group in groups" :key="group.id" :label="group.title" :value="group.id" />
+            </el-select>
+          </el-form-item>
+          <p class="form-hint">{{ selectedIds.length }} profil terpilih akan dipindahkan ke grup ini.</p>
+        </template>
+
+        <template v-else-if="bulkKind === 'proxy'">
+          <el-form-item label="Tipe Proxy">
+            <el-radio-group v-model="bulkForm.proxy_type">
+              <el-radio value="direct">Direct</el-radio>
+              <el-radio value="http">HTTP</el-radio>
+              <el-radio value="https">HTTPS</el-radio>
+              <el-radio value="socks5">SOCKS5</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <template v-if="bulkForm.proxy_type !== 'direct'">
+            <el-form-item label="Host" required :error="bulkErrors.proxy_ip">
+              <el-input v-model="bulkForm.proxy_ip" placeholder="203.0.113.10" @input="bulkErrors.proxy_ip = ''" />
+            </el-form-item>
+            <el-form-item label="Port" required :error="bulkErrors.proxy_port">
+              <el-input
+                v-model="bulkForm.proxy_port"
+                type="number"
+                min="1"
+                max="65535"
+                class="field-180"
+                placeholder="8080"
+                @input="bulkErrors.proxy_port = ''"
+              />
+            </el-form-item>
+            <el-form-item label="Username">
+              <el-input v-model="bulkForm.proxy_user" placeholder="opsional" />
+            </el-form-item>
+            <el-form-item label="Password">
+              <el-input v-model="bulkForm.proxy_password" type="password" show-password placeholder="opsional" />
+            </el-form-item>
+          </template>
+          <p class="form-hint">Konfigurasi ini menggantikan proxy {{ selectedIds.length }} profil terpilih.</p>
+        </template>
+
+        <template v-else-if="bulkKind === 'platform'">
+          <el-form-item label="Platform">
+            <el-radio-group v-model="bulkForm.platform">
+              <el-radio value="Windows">Windows</el-radio>
+              <el-radio value="Macos">macOS</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item :label="bulkForm.platform === 'Macos' ? 'Versi macOS' : 'Versi Windows'">
+            <el-select v-model="bulkForm.system_version" class="field-180">
+              <el-option v-for="version in bulkVersionOptions" :key="version" :label="version" :value="version" />
+            </el-select>
+          </el-form-item>
+          <p class="form-hint">Platform dan versi sistem diterapkan ke {{ selectedIds.length }} profil terpilih.</p>
+        </template>
+      </el-form>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="bulkVisible = false">Batal</el-button>
+          <div class="footer-spacer"></div>
+          <el-button type="primary" :loading="bulkBusy" @click="submitBulkEdit">Simpan</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
