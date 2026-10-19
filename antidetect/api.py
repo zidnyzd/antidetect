@@ -1,9 +1,12 @@
 """ixBrowser-compatible local API server (subset), stdlib only."""
 import json
 import shutil
+import subprocess
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import cookies, extensions, launcher, proxycheck, store
+from .paths import DATA_DIR
 
 ACTIONS = {}
 
@@ -33,6 +36,78 @@ def _active_profile(conn, pid):
     if not row or row["deleted_at"]:
         raise ApiError(1002, "profile not found")
     return row
+
+
+_engine_versions = {}
+_engine_versions_lock = threading.Lock()
+
+
+def _read_engine_version(binary):
+    try:
+        done = subprocess.run(
+            [str(binary), "--version"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for stream in (done.stdout, done.stderr):
+        for line in (stream or "").splitlines():
+            line = line.strip()
+            if line:
+                return line
+    return None
+
+
+def _engine_version(binary):
+    """Read chrome --version once per process."""
+    key = str(binary)
+    with _engine_versions_lock:
+        if key not in _engine_versions:
+            _engine_versions[key] = _read_engine_version(key)
+        return _engine_versions[key]
+
+
+@action("engine-info")
+def engine_info(params):
+    kernels = [
+        {
+            "version": _engine_version(launcher.CHROME),
+            "path": str(launcher.CHROME),
+            "active": True,
+            "supports": launcher.kernel_support(),
+        }
+    ]
+    root = DATA_DIR / "kernels"
+    try:
+        entries = sorted(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        entries = []
+    for entry in entries:
+        binary = entry / "chrome"
+        if binary.is_file():
+            kernels.append(
+                {
+                    "version": _engine_version(binary),
+                    "path": str(binary),
+                    "active": False,
+                    "supports": launcher.kernel_support(binary),
+                }
+            )
+    return {
+        "path": str(launcher.ENGINE_DIR),
+        "version": kernels[0]["version"],
+        "kernels": kernels,
+    }
+
+
+@action("profile-reset-seed")
+def profile_reset_seed(params):
+    pid = _pid(params)
+    if launcher.is_open(pid):
+        raise ApiError(1004, "close the profile first")
+    with store.db() as conn:
+        _active_profile(conn, pid)
+        store.update_profile(conn, pid, {"seed": launcher.rand_seed()})
+        return {"profile_id": pid, "seed": store.latest_seed(conn, pid)}
 
 
 @action("profile-list")
@@ -117,6 +192,7 @@ def profile_copy(params):
         row = _active_profile(conn, pid)
         data = store.profile_to_dict(row)
         data.pop("profile_id")
+        data.pop("seed", None)
         data["name"] = params.get("name") or f"{row['name']} copy"
         return {"profile_id": store.create_profile(conn, data)}
 

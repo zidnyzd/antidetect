@@ -925,6 +925,23 @@ button {
   box-shadow: 0 8px 24px rgba(29, 33, 41, 0.12);
 }
 
+.profile-dialog.el-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: 88vh;
+  margin-bottom: 0;
+}
+
+.profile-dialog > .el-dialog__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.profile-dialog > .el-dialog__footer {
+  flex-shrink: 0;
+}
+
 .el-dialog__header {
   padding: 16px 20px;
   margin: 0;
@@ -991,6 +1008,54 @@ button {
   font-size: 12px;
   color: var(--ix-muted);
   line-height: 1.6;
+}
+
+.form-hint.is-warn {
+  color: #b45309;
+}
+
+.seed-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--ix-border);
+  border-radius: var(--ix-radius);
+  background: var(--ix-bg);
+}
+
+.seed-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.seed-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ix-muted);
+}
+
+.seed-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ix-text);
+}
+
+.switch-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.switch-label {
+  font-size: 13px;
+  color: var(--ix-text-secondary);
 }
 
 .field-180 {
@@ -1221,6 +1286,56 @@ button {
   font-size: 12px;
   line-height: 1.6;
   color: var(--ix-muted);
+}
+
+.engine-card {
+  grid-column: 1 / -1;
+}
+
+.kernel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kernel-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--ix-border-light);
+  border-radius: var(--ix-radius);
+  background: #f9fafb;
+}
+
+.kernel-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kernel-version {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ix-text);
+}
+
+.kernel-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ix-primary-soft);
+  color: var(--ix-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.kernel-path {
+  font-size: 12px;
+  color: var(--ix-muted);
+  word-break: break-all;
 }
 
 /* Responsive */

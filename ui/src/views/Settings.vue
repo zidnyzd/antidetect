@@ -7,6 +7,8 @@ const health = ref(null)
 const healthError = ref('')
 const profileTotal = ref(null)
 const profilesError = ref('')
+const engine = ref(null)
+const engineError = ref('')
 const loading = ref(true)
 
 const apiBase = computed(() => `${window.location.origin}/api/v2/`)
@@ -32,9 +34,19 @@ async function loadProfileTotal() {
   }
 }
 
+async function loadEngine() {
+  try {
+    engine.value = await api.engineInfo()
+    engineError.value = ''
+  } catch (error) {
+    engine.value = null
+    engineError.value = error.message
+  }
+}
+
 async function load() {
   loading.value = true
-  await Promise.all([loadHealth(), loadProfileTotal()])
+  await Promise.all([loadHealth(), loadProfileTotal(), loadEngine()])
   loading.value = false
 }
 
@@ -64,6 +76,28 @@ useOnRefresh(() => load())
           <template v-else-if="healthError">Permintaan /health gagal: {{ healthError }}</template>
           <template v-else>Menunggu respons /health.</template>
         </p>
+      </section>
+
+      <section class="info-card engine-card">
+        <div class="info-label">Engine</div>
+        <div class="info-value mono">{{ engine ? engine.path : 'Tidak tersedia' }}</div>
+        <p class="info-help">
+          <template v-if="engine">
+            {{ engine.version || 'Versi tidak terbaca' }} · {{ engine.kernels.length }} kernel terpasang
+          </template>
+          <template v-else-if="engineError">engine-info gagal: {{ engineError }}</template>
+          <template v-else>Menunggu engine-info.</template>
+        </p>
+        <ul v-if="engine" class="kernel-list">
+          <li v-for="kernel in engine.kernels" :key="kernel.path" class="kernel-item">
+            <div class="kernel-line">
+              <span class="kernel-version">{{ kernel.version || 'Versi tidak terbaca' }}</span>
+              <span v-if="kernel.active" class="kernel-badge">Aktif</span>
+            </div>
+            <span class="kernel-path mono">{{ kernel.path }}</span>
+          </li>
+        </ul>
+        <p v-if="engine && engine.kernels.length === 1" class="info-help">Hanya satu kernel terpasang.</p>
       </section>
 
       <section class="info-card">

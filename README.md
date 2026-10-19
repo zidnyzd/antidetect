@@ -48,7 +48,9 @@ venv/bin/python scripts/selftest.py
   cek proxy dengan IP dan latensi, pilih proxy tersimpan, atur jendela
 - [x] kelola extension lokal (unggah zip/crx, daftar, hapus dengan proteksi
   pemakaian) dan pemilihan extension per profil
-- [ ] fingerprint lanjutan dan pilih versi kernel
+- [x] info engine/kernel di Pengaturan, acak seed, kolom GPU Vendor/Renderer
+  dan opsi tampilkan GPU host (binary 150 belum menerapkan flag GPU)
+- [ ] pemilihan versi kernel dan penegakan fingerprint GPU di engine
 
 ## Pemetaan fingerprint_config ke flag engine
 
@@ -101,6 +103,12 @@ proxy auth tanpa keluar lewat proxy internet: `scripts/test-auth-proxy.py`
 - Faktor skala perangkat. `--fingerprint-device-scale-factor` tidak mengubah
   `window.devicePixelRatio` (tetap 1 di headless maupun headed).
 - Platform Android/iOS dan mode mobile (ua_type 2): engine hanya Windows/macOS.
+- Flag GPU `--fingerprint-gpu-vendor`, `--fingerprint-gpu-renderer`, dan
+  `--disable-gpu-fingerprint` tidak ada di binary 150. Nilai GPU Vendor/Renderer
+  tetap disimpan dan UI memberi peringatan, tetapi belum diterapkan engine.
+  Opsi tampilkan GPU host memakai `--disable-spoofing=gpu` bila tersedia.
+- Pemilihan versi kernel belum ada; `engine-info` hanya melaporkan kernel yang
+  terpasang dan launcher selalu memakai engine bawaan.
 - Belum dipetakan dan tidak diklaim: `fonts`, `webrtc`, `canvas`, `audio_context`,
   `webgl_*`, `javascript_memory_type`, dan atribut SDK lain di luar tabel.
 - `resolving_power_type`, `language_type`, `timezone_type`, `location*` (tidak

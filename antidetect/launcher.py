@@ -1,5 +1,6 @@
 """Launch, track and stop Chromium processes, one per profile."""
 import json
+import mmap
 import os
 import secrets
 import shutil
@@ -23,7 +24,37 @@ CHROMEDRIVER = ENGINE_DIR / "chromedriver"
 PROFILES_DIR = DATA_DIR / "profiles"
 GOST_FALLBACK = Path.home() / ".local" / "bin" / "gost"
 
+GPU_FLAG_NAMES = {
+    "gpu_vendor": "fingerprint-gpu-vendor",
+    "gpu_renderer": "fingerprint-gpu-renderer",
+    "disable_gpu_fingerprint": "disable-gpu-fingerprint",
+    "disable_spoofing": "disable-spoofing",
+}
+
 _open = {}
+_flag_cache = {}
+
+
+def flag_supported(name, binary=None):
+    """Check the engine binary for a switch name (mmap scan, cached).
+
+    Engine 150 dropped the explicit GPU fingerprint flags, so callers gate
+    them here instead of passing switches the binary silently ignores.
+    """
+    path = Path(binary or CHROME)
+    key = (str(path), name)
+    if key not in _flag_cache:
+        try:
+            with open(path, "rb") as handle:
+                with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as blob:
+                    _flag_cache[key] = blob.find(name.encode()) >= 0
+        except (OSError, ValueError):
+            _flag_cache[key] = False
+    return _flag_cache[key]
+
+
+def kernel_support(binary=None):
+    return {key: flag_supported(name, binary) for key, name in GPU_FLAG_NAMES.items()}
 
 
 class LaunchError(Exception):
@@ -49,6 +80,29 @@ def _platform_arg(fp):
     if value in ("macos", "mac", "mac os"):
         return "macos"
     return None  # android/ios not supported by the engine
+
+
+def _gpu_args(fp, binary=None):
+    """GPU fingerprint switches the installed kernel understands.
+
+    Upstream removed --fingerprint-gpu-vendor, --fingerprint-gpu-renderer and
+    --disable-gpu-fingerprint in Chrome 144; engine 150 replaced the last one
+    with --disable-spoofing=gpu, which reveals the host GPU. Emit only what
+    the binary actually knows so profiles never carry dead switches.
+    """
+    args = []
+    vendor = str(fp.get("gpu_vendor") or "").strip()
+    if vendor and flag_supported("fingerprint-gpu-vendor", binary):
+        args.append(f"--fingerprint-gpu-vendor={vendor}")
+    renderer = str(fp.get("gpu_renderer") or "").strip()
+    if renderer and flag_supported("fingerprint-gpu-renderer", binary):
+        args.append(f"--fingerprint-gpu-renderer={renderer}")
+    if fp.get("disable_gpu_fingerprint"):
+        if flag_supported("disable-gpu-fingerprint", binary):
+            args.append("--disable-gpu-fingerprint")
+        elif flag_supported("disable-spoofing", binary):
+            args.append("--disable-spoofing=gpu")
+    return args
 
 
 def _proxy_spec(profile):
@@ -166,6 +220,8 @@ def build_args(profile, port, app_args=None, proxy_arg=None):
         args.append(f"--accept-lang={fp['language']}")
     if fp.get("timezone"):
         args.append(f"--timezone={fp['timezone']}")
+
+    args.extend(_gpu_args(fp))
 
     extension_ids = (profile.get("preference_config") or {}).get("extension_ids")
     if extension_ids and not os.environ.get("ANTIDETECT_NO_EXTENSIONS"):

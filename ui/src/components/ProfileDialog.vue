@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api'
 
 const props = defineProps({
@@ -92,9 +92,18 @@ const CPU_CORES = [2, 4, 6, 8, 12, 16]
 const MEMORY = [2, 4, 8]
 const WINDOWS_VERSIONS = ['11', '10', '8.1', '7']
 const MACOS_VERSIONS = ['14', '13', '12']
+const GPU_VENDORS = [
+  'Google Inc. (NVIDIA)',
+  'Google Inc. (Intel)',
+  'Google Inc. (AMD)',
+  'Google Inc. (Apple)',
+]
 
 const activeTab = ref('account')
 const busy = ref(false)
+const seedBusy = ref(false)
+const seedOverride = ref(null)
+const engineCaps = ref(null)
 const savedProxies = ref([])
 const savedProxyId = ref(null)
 const extensionOptions = ref([])
@@ -121,6 +130,9 @@ function emptyForm() {
     system_version: '11',
     hardware_concurrency: 8,
     device_memory: 8,
+    gpu_vendor: '',
+    gpu_renderer: '',
+    disable_gpu_fingerprint: false,
     timezone: 'Asia/Jakarta',
     language: 'id-ID',
     extension_ids: [],
@@ -144,6 +156,31 @@ const versionLabel = computed(() => (form.platform === 'Macos' ? 'Versi macOS' :
 const savedProxyPlaceholder = computed(() =>
   savedProxies.value.length ? 'Manual / isi sendiri' : 'Belum ada proxy tersimpan'
 )
+const displaySeed = computed(() => seedOverride.value ?? props.profile?.seed ?? null)
+const seedText = computed(() => {
+  if (!isEdit.value) return 'Seed dibuat saat disimpan'
+  return displaySeed.value == null ? 'Seed belum terbaca' : String(displaySeed.value)
+})
+const gpuSupport = computed(() => engineCaps.value || null)
+const gpuFieldHint = computed(() => {
+  const support = gpuSupport.value
+  if (!support) return ''
+  if (!form.gpu_vendor && !form.gpu_renderer) return ''
+  const missing = []
+  if (!support.gpu_vendor) missing.push('GPU Vendor')
+  if (!support.gpu_renderer) missing.push('GPU Renderer')
+  if (!missing.length) return ''
+  return `Kernel aktif belum mendukung ${missing.join(' dan ')}, nilainya disimpan tapi tidak diterapkan engine.`
+})
+const gpuSwitchHint = computed(() => {
+  const support = gpuSupport.value
+  if (!support) return ''
+  if (support.disable_gpu_fingerprint) return 'Jika diaktifkan, kernel memakai --disable-gpu-fingerprint.'
+  if (support.disable_spoofing) {
+    return 'Jika diaktifkan, kernel memakai --disable-spoofing=gpu: situs membaca GPU asli host.'
+  }
+  return 'Kernel aktif tidak punya cara mematikan spoofing GPU.'
+})
 
 function proxyTypeValue(raw) {
   const value = String(raw || 'direct').toLowerCase()
@@ -173,6 +210,9 @@ function fillFromProfile(profile) {
     ? Number(fingerprint.hardware_concurrency)
     : 8
   form.device_memory = MEMORY.includes(Number(fingerprint.device_memory)) ? Number(fingerprint.device_memory) : 8
+  form.gpu_vendor = String(fingerprint.gpu_vendor || '')
+  form.gpu_renderer = String(fingerprint.gpu_renderer || '')
+  form.disable_gpu_fingerprint = !!fingerprint.disable_gpu_fingerprint
   form.timezone = fingerprint.timezone || 'Asia/Jakarta'
   form.language = fingerprint.language || 'id-ID'
   const extensionIds = (profile.preference_config || {}).extension_ids
@@ -188,6 +228,7 @@ function clearErrors() {
 function resetForm() {
   Object.assign(form, emptyForm())
   savedProxyId.value = null
+  seedOverride.value = null
   proxyCheck.loading = false
   proxyCheck.ok = null
   proxyCheck.text = ''
@@ -224,6 +265,17 @@ async function loadExtensions() {
   }
 }
 
+async function loadEngineCaps() {
+  try {
+    const result = await api.engineInfo()
+    const kernels = Array.isArray(result?.kernels) ? result.kernels : []
+    const active = kernels.find((kernel) => kernel.active) || kernels[0] || {}
+    engineCaps.value = active.supports || null
+  } catch {
+    engineCaps.value = null
+  }
+}
+
 watch(
   () => props.modelValue,
   (open) => {
@@ -231,6 +283,7 @@ watch(
       resetForm()
       loadSavedProxies()
       loadExtensions()
+      loadEngineCaps()
     }
   }
 )
@@ -284,11 +337,17 @@ function validateForm() {
 }
 
 function fingerprintPayload() {
+  const saved = props.profile?.fingerprint_config
+  const base = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}
   return {
+    ...base,
     platform: form.platform,
     system_version: form.system_version,
     hardware_concurrency: Number(form.hardware_concurrency),
     device_memory: Number(form.device_memory),
+    gpu_vendor: form.gpu_vendor.trim() || null,
+    gpu_renderer: form.gpu_renderer.trim() || null,
+    disable_gpu_fingerprint: !!form.disable_gpu_fingerprint,
     timezone: form.timezone,
     language: form.language,
   }
@@ -401,6 +460,35 @@ async function submit() {
     ElMessage.error(`${isEdit.value ? 'Gagal menyimpan perubahan' : 'Gagal membuat profil'}: ${error.message}`)
   } finally {
     busy.value = false
+  }
+}
+
+async function randomizeSeed() {
+  if (!isEdit.value) return
+  try {
+    await ElMessageBox.confirm(
+      'Acak seed fingerprint profil ini? Fingerprint akan berbeda saat profil dibuka berikutnya.',
+      'Acak Seed',
+      { confirmButtonText: 'Acak', cancelButtonText: 'Batal' }
+    )
+  } catch {
+    return
+  }
+  seedBusy.value = true
+  try {
+    const result = await api.resetSeed(props.profile.profile_id)
+    seedOverride.value = result.seed
+    ElMessage.success('Seed baru disimpan')
+    emit('saved', {
+      mode: 'seed',
+      profileId: props.profile.profile_id,
+      name: form.name.trim() || props.profile.name,
+      seed: result.seed,
+    })
+  } catch (error) {
+    ElMessage.error(`Gagal mengacak seed: ${error.message}`)
+  } finally {
+    seedBusy.value = false
   }
 }
 
@@ -594,6 +682,13 @@ async function testProxy() {
       </el-tab-pane>
 
       <el-tab-pane label="Fingerprint" name="fingerprint">
+        <div class="seed-bar">
+          <div class="seed-cell">
+            <span class="seed-label">Seed Fingerprint</span>
+            <span class="seed-value mono">{{ seedText }}</span>
+          </div>
+          <el-button v-if="isEdit" size="small" :loading="seedBusy" @click="randomizeSeed">Acak Seed</el-button>
+        </div>
         <el-form label-width="150px" label-position="right" class="dialog-form" @submit.prevent>
           <el-form-item label="Platform">
             <el-radio-group v-model="form.platform">
@@ -616,6 +711,33 @@ async function testProxy() {
               <el-option v-for="memory in MEMORY" :key="memory" :label="memory" :value="memory" />
             </el-select>
           </el-form-item>
+          <el-form-item label="GPU Vendor">
+            <el-select
+              v-model="form.gpu_vendor"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="Ikuti seed atau tulis vendor"
+              class="field-260"
+            >
+              <el-option v-for="vendor in GPU_VENDORS" :key="vendor" :label="vendor" :value="vendor" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="GPU Renderer">
+            <el-input
+              v-model="form.gpu_renderer"
+              placeholder="ANGLE (NVIDIA, NVIDIA GeForce RTX 5060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+            />
+          </el-form-item>
+          <p v-if="gpuFieldHint" class="form-hint is-warn">{{ gpuFieldHint }}</p>
+          <el-form-item label="GPU Host">
+            <div class="switch-cell">
+              <el-switch v-model="form.disable_gpu_fingerprint" />
+              <span class="switch-label">Tampilkan GPU asli</span>
+            </div>
+          </el-form-item>
+          <p v-if="gpuSwitchHint" class="form-hint">{{ gpuSwitchHint }}</p>
           <el-form-item label="Zona Waktu">
             <el-select
               v-model="form.timezone"
@@ -640,6 +762,7 @@ async function testProxy() {
               <el-option v-for="lang in LANGUAGES" :key="lang" :label="lang" :value="lang" />
             </el-select>
           </el-form-item>
+          <p class="form-hint">WebRTC: UDP non-proxy diblokir otomatis oleh engine.</p>
           <p class="form-hint">Layar dan device scale factor belum didukung engine 150.</p>
         </el-form>
       </el-tab-pane>

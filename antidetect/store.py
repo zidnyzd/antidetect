@@ -126,7 +126,7 @@ def _int_list(value):
     return result
 
 
-def profile_to_dict(row, include_seed=False):
+def profile_to_dict(row, include_seed=True):
     data = {
         "profile_id": row["id"],
         "name": row["name"],

@@ -610,7 +610,13 @@ async function onGroupsChanged() {
   await loadProfiles()
 }
 
-async function onSaved({ mode, profileId, name }) {
+async function onSaved({ mode, profileId, name, seed }) {
+  if (mode === 'seed') {
+    if (editingProfile.value) editingProfile.value.seed = seed
+    await loadProfiles()
+    ElMessage.success(`Seed profil "${name}" diperbarui`)
+    return
+  }
   dialogVisible.value = false
   clearSelection()
   await Promise.all([loadProfiles(), loadTags()])
