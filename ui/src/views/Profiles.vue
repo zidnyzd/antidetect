@@ -291,24 +291,28 @@ async function duplicateProfile(profile) {
 
 async function removeProfile(profile) {
   try {
-    await ElMessageBox.confirm(`Hapus profil "${profile.name}"? Tindakan ini tidak bisa dibatalkan.`, 'Hapus Profil', {
-      type: 'warning',
-      confirmButtonText: 'Hapus',
-      cancelButtonText: 'Batal',
-      confirmButtonClass: 'el-button--danger',
-    })
+    await ElMessageBox.confirm(
+      `Profil "${profile.name}" dipindahkan ke Keranjang Sampah. Lanjutkan?`,
+      'Pindahkan ke Keranjang Sampah',
+      {
+        type: 'warning',
+        confirmButtonText: 'Pindahkan',
+        cancelButtonText: 'Batal',
+        confirmButtonClass: 'el-button--danger',
+      }
+    )
   } catch {
     return
   }
   try {
     await api.deleteProfile(profile.profile_id)
-    ElMessage.success('Profil dihapus')
+    ElMessage.success(`Profil "${profile.name}" dipindahkan ke keranjang sampah`)
     clearSelection()
     if (visibleRows.value.length === 1 && page.value > 1) page.value -= 1
     await loadProfiles()
     await pollOpened()
   } catch (error) {
-    ElMessage.error(`Gagal menghapus: ${error.message}`)
+    ElMessage.error(`Gagal memindahkan profil: ${error.message}`)
   }
 }
 
@@ -358,12 +362,16 @@ async function runBulk(command) {
 
   if (command === 'delete') {
     try {
-      await ElMessageBox.confirm(`Hapus ${chosen.length} profil terpilih? Tindakan ini tidak bisa dibatalkan.`, 'Hapus Profil', {
-        type: 'warning',
-        confirmButtonText: 'Hapus',
-        cancelButtonText: 'Batal',
-        confirmButtonClass: 'el-button--danger',
-      })
+      await ElMessageBox.confirm(
+        `Pindahkan ${chosen.length} profil terpilih ke Keranjang Sampah. Lanjutkan?`,
+        'Pindahkan ke Keranjang Sampah',
+        {
+          type: 'warning',
+          confirmButtonText: 'Pindahkan',
+          cancelButtonText: 'Batal',
+          confirmButtonClass: 'el-button--danger',
+        }
+      )
     } catch {
       return
     }
@@ -382,8 +390,8 @@ async function runBulk(command) {
     clearSelection()
     await loadProfiles()
     await pollOpened()
-    if (ok) ElMessage.success(`${ok} profil dihapus`)
-    if (fail) ElMessage.error(`${fail} profil gagal dihapus`)
+    if (ok) ElMessage.success(`${ok} profil dipindahkan ke keranjang sampah`)
+    if (fail) ElMessage.error(`${fail} profil gagal dipindahkan`)
     return
   }
 

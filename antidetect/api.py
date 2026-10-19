@@ -28,6 +28,13 @@ def _pid(params):
     return int(pid)
 
 
+def _active_profile(conn, pid):
+    row = store.profile_get(conn, pid)
+    if not row or row["deleted_at"]:
+        raise ApiError(1002, "profile not found")
+    return row
+
+
 @action("profile-list")
 def profile_list(params):
     page = int(params.get("page") or 1)
@@ -55,8 +62,7 @@ def profile_create(params):
 def profile_update(params):
     pid = _pid(params)
     with store.db() as conn:
-        if not store.profile_get(conn, pid):
-            raise ApiError(1002, "profile not found")
+        _active_profile(conn, pid)
         store.update_profile(conn, pid, params)
         return True
 
@@ -66,9 +72,41 @@ def profile_delete(params):
     pid = _pid(params)
     launcher.close_profile(pid)
     with store.db() as conn:
-        if not store.profile_get(conn, pid):
+        _active_profile(conn, pid)
+        store.soft_delete_profile(conn, pid)
+        return True
+
+
+@action("profile-recycle-list")
+def profile_recycle_list(params):
+    page = int(params.get("page") or 1)
+    limit = int(params.get("limit") or 10)
+    with store.db() as conn:
+        total, rows = store.list_profiles(
+            conn, page=page, limit=limit, name=params.get("name"), deleted=True
+        )
+        return {"total": total, "data": [store.profile_to_dict(r) for r in rows]}
+
+
+@action("profile-restore")
+def profile_restore(params):
+    pid = _pid(params)
+    with store.db() as conn:
+        row = store.profile_get(conn, pid)
+        if not row or not row["deleted_at"]:
             raise ApiError(1002, "profile not found")
-        store.delete_profile(conn, pid)
+        store.restore_profile(conn, pid)
+        return True
+
+
+@action("profile-delete-permanent")
+def profile_delete_permanent(params):
+    pid = _pid(params)
+    with store.db() as conn:
+        row = store.profile_get(conn, pid)
+        if not row or not row["deleted_at"]:
+            raise ApiError(1002, "profile not found")
+        store.delete_profile_permanent(conn, pid)
         return True
 
 
@@ -76,9 +114,7 @@ def profile_delete(params):
 def profile_copy(params):
     pid = _pid(params)
     with store.db() as conn:
-        row = store.profile_get(conn, pid)
-        if not row:
-            raise ApiError(1002, "profile not found")
+        row = _active_profile(conn, pid)
         data = store.profile_to_dict(row)
         data.pop("profile_id")
         data["name"] = params.get("name") or f"{row['name']} copy"
@@ -89,9 +125,7 @@ def profile_copy(params):
 def profile_open(params):
     pid = _pid(params)
     with store.db() as conn:
-        row = store.profile_get(conn, pid)
-        if not row:
-            raise ApiError(1002, "profile not found")
+        row = _active_profile(conn, pid)
         profile = store.profile_to_dict(row, include_seed=True)
     profile["id"] = pid
     try:
@@ -107,9 +141,7 @@ def profile_open(params):
 def profile_open_random(params):
     pid = _pid(params)
     with store.db() as conn:
-        row = store.profile_get(conn, pid)
-        if not row:
-            raise ApiError(1002, "profile not found")
+        row = _active_profile(conn, pid)
         profile = store.profile_to_dict(row, include_seed=True)
         fp = dict(profile["fingerprint_config"])
         fp.update(params.get("fingerprint_config") or {})
@@ -245,7 +277,8 @@ def profile_clear_cache_ext(params):
 
 @action("empty-recycle-bin")
 def empty_recycle_bin(params):
-    return True
+    with store.db() as conn:
+        return {"count": store.empty_recycle_bin(conn)}
 
 
 def _paginated(conn, table, page, limit):
@@ -263,7 +296,8 @@ def group_list(params):
         total = conn.execute("SELECT COUNT(*) AS c FROM groups").fetchone()["c"]
         rows = conn.execute(
             """SELECT id, title, sort, created_at,
-                      (SELECT COUNT(*) FROM profiles WHERE group_id = groups.id) AS profile_count
+                      (SELECT COUNT(*) FROM profiles
+                        WHERE group_id = groups.id AND deleted_at IS NULL) AS profile_count
                FROM groups
                ORDER BY sort DESC, id ASC
                LIMIT ? OFFSET ?""",
@@ -352,7 +386,10 @@ def group_delete(params):
             "SELECT COUNT(*) AS c FROM profiles WHERE group_id = ?", (gid,)
         ).fetchone()["c"]
         if count > 0:
-            raise ApiError(1105, f"Grup masih berisi {count} profil, pindahkan dulu")
+            raise ApiError(
+                1105,
+                f"Grup masih berisi {count} profil (termasuk keranjang sampah), pindahkan dulu",
+            )
         conn.execute("DELETE FROM groups WHERE id = ?", (gid,))
         conn.commit()
         return True

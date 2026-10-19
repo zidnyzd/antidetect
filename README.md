@@ -40,7 +40,12 @@ venv/bin/python scripts/selftest.py
 - [x] UI: daftar profil, buat/edit 4 tab, tag per profil, kelola grup,
   waktu dibuat dan terakhir dibuka, buka/tutup, duplikat/hapus, filter,
   pagination, halaman proxy dan pengaturan
-- [ ] import/export cookie, extensions
+- [x] cookie import/export per profil dan aksi cache (cache, cache + cookie,
+  cache simpan extension, hapus password tersimpan)
+- [x] keranjang sampah: hapus jadi soft delete, pulihkan, hapus permanen,
+  kosongkan keranjang
+- [ ] kelola extension lokal dan pemilihan per profil
+- [ ] fingerprint lanjutan dan pilih versi kernel
 
 ## Pemetaan fingerprint_config ke flag engine
 
@@ -140,6 +145,12 @@ untuk masing-masing nilai. Tombol di samping filter grup membuka kelola grup:
 tambah, edit nama dan urutan, cari, serta hapus. Grup Default dan grup yang
 masih berisi profil dilindungi dari penghapusan.
 
+Menu tiap baris profil menyediakan Cookie (muat, impor file, salin, unduh,
+simpan), bersihkan cache, cache + cookie, cache simpan extension, dan hapus
+password tersimpan. Hapus profil memindahkannya ke halaman Keranjang Sampah;
+dari sana profil bisa dipulihkan, dihapus permanen, atau dikosongkan
+sekaligus.
+
 ```bash
 cd ui
 npm install
@@ -147,10 +158,11 @@ npm run dev        # http://127.0.0.1:5180, proxy /api dan /health ke :53200
 npm run build      # hasil produksi ke ui/dist
 ```
 
-Butuh Node.js 18+. Alur yang sudah diuji lewat UI: buat, edit, duplikat, hapus,
-buka/tutup profil dengan timestamp terakhir dibuka, tag per profil, kelola grup,
-filter status dan grup, pencarian, pagination, serta CRUD proxy. Shell desktop
-(Tauri/Electron) menyusul.
+Butuh Node.js 18+. Alur yang sudah diuji lewat UI: buat, edit, duplikat, hapus
+ke keranjang, buka/tutup profil dengan timestamp terakhir dibuka, tag per
+profil, kelola grup, filter status dan grup, pencarian, pagination, cookie
+import/export, aksi cache, pemulihan keranjang sampah, serta CRUD proxy. Shell
+desktop (Tauri/Electron) menyusul.
 
 ## Lisensi
 

@@ -1,6 +1,6 @@
 <script setup>
 import { useRoute } from 'vue-router'
-import { Connection, Monitor, Setting } from '@element-plus/icons-vue'
+import { Connection, Delete, Monitor, Setting } from '@element-plus/icons-vue'
 
 defineProps({ collapsed: Boolean })
 
@@ -8,6 +8,7 @@ const route = useRoute()
 
 const browserItems = [
   { path: '/', label: 'Daftar Profil', icon: Monitor },
+  { path: '/recycle', label: 'Keranjang Sampah', icon: Delete },
   { path: '/proxies', label: 'Proxy', icon: Connection },
 ]
 const systemItems = [{ path: '/settings', label: 'Pengaturan', icon: Setting }]

@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS profiles (
     last_open_time INTEGER,
     seed INTEGER,
     created_at TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,6 +77,8 @@ def init():
             conn.execute("ALTER TABLE profiles ADD COLUMN tag_ids TEXT DEFAULT '[]'")
         if "last_open_time" not in columns:
             conn.execute("ALTER TABLE profiles ADD COLUMN last_open_time INTEGER")
+        if "deleted_at" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN deleted_at TEXT")
         group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
         if "created_at" not in group_columns:
             conn.execute("ALTER TABLE groups ADD COLUMN created_at TEXT")
@@ -131,6 +134,7 @@ def profile_to_dict(row, include_seed=False):
         "last_open_time": row["last_open_time"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "deleted_at": row["deleted_at"],
     }
     if include_seed:
         data["seed"] = row["seed"]
@@ -141,8 +145,9 @@ def profile_get(conn, profile_id):
     return conn.execute("SELECT * FROM profiles WHERE id = ?", (int(profile_id),)).fetchone()
 
 
-def list_profiles(conn, page=1, limit=10, group_id=None, name=None, profile_id=None):
+def list_profiles(conn, page=1, limit=10, group_id=None, name=None, profile_id=None, deleted=False):
     clauses, args = [], []
+    clauses.append("deleted_at IS NOT NULL" if deleted else "deleted_at IS NULL")
     if profile_id:
         clauses.append("id = ?")
         args.append(int(profile_id))
@@ -152,10 +157,11 @@ def list_profiles(conn, page=1, limit=10, group_id=None, name=None, profile_id=N
     if name:
         clauses.append("name LIKE ?")
         args.append(f"%{name}%")
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    where = f"WHERE {' AND '.join(clauses)}"
     total = conn.execute(f"SELECT COUNT(*) AS c FROM profiles {where}", args).fetchone()["c"]
+    order = "deleted_at DESC, id DESC" if deleted else "id DESC"
     rows = conn.execute(
-        f"SELECT * FROM profiles {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM profiles {where} ORDER BY {order} LIMIT ? OFFSET ?",
         [*args, int(limit), (int(page) - 1) * int(limit)],
     ).fetchall()
     return total, rows
@@ -223,9 +229,34 @@ def mark_opened(conn, profile_id, timestamp=None):
 
 
 def delete_profile(conn, profile_id):
+    """Permanent delete, retained for the CLI."""
+    delete_profile_permanent(conn, profile_id)
+
+
+def soft_delete_profile(conn, profile_id):
+    conn.execute(
+        "UPDATE profiles SET deleted_at = ? WHERE id = ?",
+        (now(), int(profile_id)),
+    )
+    conn.commit()
+
+
+def restore_profile(conn, profile_id):
+    conn.execute("UPDATE profiles SET deleted_at = NULL WHERE id = ?", (int(profile_id),))
+    conn.commit()
+
+
+def delete_profile_permanent(conn, profile_id):
     conn.execute("DELETE FROM profiles WHERE id = ?", (int(profile_id),))
     conn.commit()
     shutil.rmtree(launcher.PROFILES_DIR / str(profile_id), ignore_errors=True)
+
+
+def empty_recycle_bin(conn):
+    rows = conn.execute("SELECT id FROM profiles WHERE deleted_at IS NOT NULL").fetchall()
+    for row in rows:
+        delete_profile_permanent(conn, row["id"])
+    return len(rows)
 
 
 def latest_seed(conn, profile_id):

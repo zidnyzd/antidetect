@@ -458,6 +458,16 @@ button {
   color: var(--ix-text-secondary);
 }
 
+.recycle-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ix-muted);
+}
+
+.recycle-table .restore-button {
+  min-width: 82px;
+}
+
 .split-button {
   display: flex;
 }
