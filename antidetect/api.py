@@ -1,11 +1,21 @@
 """ixBrowser-compatible local API server (subset), stdlib only."""
+import base64
 import json
 import shutil
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import cookies, extensions, launcher, proxycheck, store
+from . import (
+    bookmarks,
+    cookies,
+    extensions,
+    launcher,
+    passwords,
+    profileio,
+    proxycheck,
+    store,
+)
 from .paths import DATA_DIR
 
 ACTIONS = {}
@@ -197,6 +207,35 @@ def profile_copy(params):
         return {"profile_id": store.create_profile(conn, data)}
 
 
+@action("profile-export")
+def profile_export(params):
+    pid = _known_pid(params)
+    try:
+        bundle = profileio.export_profile(pid)
+    except profileio.ProfileIOError as error:
+        raise ApiError(1004, str(error))
+    content = json.dumps(bundle, ensure_ascii=False, indent=2).encode()
+    return {
+        "filename": profileio.export_filename(bundle["profile"].get("name")),
+        "content_base64": base64.b64encode(content).decode("ascii"),
+    }
+
+
+@action("profile-import")
+def profile_import(params):
+    content = params.get("content_base64")
+    try:
+        if content not in (None, ""):
+            bundle = profileio.decode_content(content)
+        elif params.get("json") not in (None, ""):
+            bundle = params.get("json")
+        else:
+            raise profileio.ProfileIOError("isi file profil kosong")
+        return profileio.import_profile(bundle)
+    except profileio.ProfileIOError as error:
+        raise ApiError(1000, str(error))
+
+
 @action("profile-open")
 def profile_open(params):
     pid = _pid(params)
@@ -385,6 +424,24 @@ def profile_clear_saved_user_password(params):
     try:
         return cookies.clear_saved_passwords(pid)
     except cookies.CookieError as error:
+        raise ApiError(1004, str(error))
+
+
+@action("profile-bookmarks")
+def profile_bookmarks(params):
+    pid = _known_pid(params)
+    try:
+        return bookmarks.list_bookmarks(pid)
+    except bookmarks.BookmarkError as error:
+        raise ApiError(1004, str(error))
+
+
+@action("profile-saved-passwords")
+def profile_saved_passwords(params):
+    pid = _known_pid(params)
+    try:
+        return passwords.list_saved_passwords(pid)
+    except passwords.PasswordError as error:
         raise ApiError(1004, str(error))
 
 

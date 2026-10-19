@@ -1,11 +1,13 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Brush, CopyDocument, Delete, Edit, Files, FolderOpened, Grid, Key, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { ArrowDown, Brush, CopyDocument, Delete, Download, Edit, Files, FolderOpened, Grid, Key, Lock, MoreFilled, Plus, Refresh, Search, Star, Upload } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
 import ProfileDialog from '../components/ProfileDialog.vue'
 import CookieDialog from '../components/CookieDialog.vue'
+import BookmarkDialog from '../components/BookmarkDialog.vue'
+import PasswordDialog from '../components/PasswordDialog.vue'
 import GroupManager from '../components/GroupManager.vue'
 
 const POOL_LIMIT = 1000
@@ -32,6 +34,12 @@ const openAfterSave = ref(false)
 const groupManagerVisible = ref(false)
 const cookieVisible = ref(false)
 const cookieProfile = ref(null)
+const bookmarkVisible = ref(false)
+const bookmarkProfile = ref(null)
+const passwordVisible = ref(false)
+const passwordProfile = ref(null)
+const importInput = ref(null)
+const importBusy = ref(false)
 const bulkKind = ref('')
 const bulkVisible = ref(false)
 const arrangeBusy = ref(false)
@@ -352,6 +360,74 @@ function openCookie(profile) {
   cookieVisible.value = true
 }
 
+function openBookmarks(profile) {
+  bookmarkProfile.value = profile
+  bookmarkVisible.value = true
+}
+
+function openPasswords(profile) {
+  passwordProfile.value = profile
+  passwordVisible.value = true
+}
+
+function triggerImport() {
+  importInput.value?.click()
+}
+
+function readBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('file tidak bisa dibaca'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function onImportFile(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  importBusy.value = true
+  try {
+    const content = await readBase64(file)
+    const profile = await api.importProfile(content)
+    page.value = 1
+    clearSelection()
+    await Promise.all([loadProfiles(), loadGroups(), loadTags()])
+    ElMessage.success(`Profil "${profile?.name || file.name}" diimpor`)
+  } catch (error) {
+    ElMessage.error(`Gagal mengimpor profil: ${error.message}`)
+  } finally {
+    importBusy.value = false
+  }
+}
+
+function base64ToBlob(base64) {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return new Blob([bytes], { type: 'application/json' })
+}
+
+async function exportProfile(profile) {
+  try {
+    const result = await api.exportProfile(profile.profile_id)
+    const url = URL.createObjectURL(base64ToBlob(result.content_base64))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.filename || `profil-${profile.name}.json`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    ElMessage.success(`Profil "${profile.name}" diekspor`)
+  } catch (error) {
+    ElMessage.error(`Gagal mengekspor: ${error.message}`)
+  }
+}
+
 async function runDataAction(profile, key) {
   const action = DATA_ACTIONS[key]
   if (!action) return
@@ -382,6 +458,18 @@ function onRowCommand(command, profile) {
   }
   if (command === 'cookie') {
     openCookie(profile)
+    return
+  }
+  if (command === 'export') {
+    exportProfile(profile)
+    return
+  }
+  if (command === 'bookmarks') {
+    openBookmarks(profile)
+    return
+  }
+  if (command === 'passwords') {
+    openPasswords(profile)
     return
   }
   if (DATA_ACTIONS[command]) runDataAction(profile, command)
@@ -738,6 +826,14 @@ useOnRefresh(() => refreshAll())
                 </template>
               </el-dropdown>
             </div>
+            <el-button :icon="Upload" :loading="importBusy" @click="triggerImport">Impor Profil</el-button>
+            <input
+              ref="importInput"
+              class="profile-file-input"
+              type="file"
+              accept=".json,application/json"
+              @change="onImportFile"
+            />
           </div>
           <div class="toolbar-right">
             <el-input v-model="search" class="search-input" placeholder="Cari nama profil" clearable>
@@ -906,6 +1002,9 @@ useOnRefresh(() => refreshAll())
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="cookie" :icon="Files">Cookie</el-dropdown-item>
+                    <el-dropdown-item command="bookmarks" :icon="Star">Bookmark</el-dropdown-item>
+                    <el-dropdown-item command="passwords" :icon="Lock">Password Tersimpan</el-dropdown-item>
+                    <el-dropdown-item command="export" :icon="Download" divided>Ekspor</el-dropdown-item>
                     <el-dropdown-item command="clear-cache" :icon="Brush" divided>Bersihkan cache</el-dropdown-item>
                     <el-dropdown-item command="clear-cache-cookies" :icon="Brush">Bersihkan cache + cookie</el-dropdown-item>
                     <el-dropdown-item command="clear-cache-extensions" :icon="Brush">
@@ -966,6 +1065,10 @@ useOnRefresh(() => refreshAll())
       :profile="cookieProfile"
       :profile-open="cookieProfile ? isOpen(cookieProfile) : false"
     />
+
+    <BookmarkDialog v-model="bookmarkVisible" :profile="bookmarkProfile" />
+
+    <PasswordDialog v-model="passwordVisible" :profile="passwordProfile" />
 
     <el-dialog
       v-model="bulkVisible"

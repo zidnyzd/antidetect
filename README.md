@@ -50,6 +50,7 @@ venv/bin/python scripts/selftest.py
   pemakaian) dan pemilihan extension per profil
 - [x] info engine/kernel di Pengaturan, acak seed, kolom GPU Vendor/Renderer
   dan opsi tampilkan GPU host (binary 150 belum menerapkan flag GPU)
+- [x] ekspor/impor profil (JSON), penampil bookmark dan password tersimpan
 - [ ] pemilihan versi kernel dan penegakan fingerprint GPU di engine
 
 ## Pemetaan fingerprint_config ke flag engine
@@ -170,6 +171,11 @@ keluar dan latensi; dialog profil bisa mengisi konfigurasi dari proxy tersimpan.
 Halaman Extension menyimpan extension lokal dari unggahan zip/crx, menampilkan
 versi dan ukurannya, serta menolak hapus selama masih dipakai profil. Tab
 Extension di dialog profil memilih extension yang dimuat saat profil dibuka.
+
+Profil bisa diekspor ke JSON dan diimpor kembali (nama diberi akhiran
+"(impor)", seed baru, cookie ikut). Menu baris juga menyediakan penampil
+Bookmark dan Password Tersimpan; password didekripsi lokal dan hanya
+ditampilkan saat tombol mata ditekan.
 
 ```bash
 cd ui

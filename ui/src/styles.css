@@ -1122,6 +1122,106 @@ button {
   tab-size: 2;
 }
 
+/* Bookmark and password dialogs */
+
+.profile-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.data-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px 4px;
+}
+
+.data-dialog-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.data-dialog-toolbar .el-input {
+  flex: 1;
+}
+
+.data-dialog-toolbar > .el-button {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.dialog-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ix-muted);
+}
+
+.data-empty {
+  padding: 24px 0;
+  font-size: 13px;
+  color: var(--ix-muted);
+}
+
+.bookmark-link {
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--ix-primary);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookmark-link:hover {
+  text-decoration: underline;
+}
+
+.password-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.password-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.password-value.is-masked {
+  color: var(--ix-muted);
+  letter-spacing: 1px;
+}
+
+.password-value.is-visible {
+  color: var(--ix-text);
+}
+
+.password-value.is-empty {
+  color: var(--ix-muted);
+  font-style: italic;
+}
+
 .field-260 {
   width: 260px;
 }
