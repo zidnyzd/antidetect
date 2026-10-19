@@ -1,10 +1,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, CopyDocument, Delete, Edit, FolderOpened, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { ArrowDown, Brush, CopyDocument, Delete, Edit, Files, FolderOpened, Key, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
 import ProfileDialog from '../components/ProfileDialog.vue'
+import CookieDialog from '../components/CookieDialog.vue'
 import GroupManager from '../components/GroupManager.vue'
 
 const POOL_LIMIT = 1000
@@ -29,6 +30,43 @@ const dialogVisible = ref(false)
 const editingProfile = ref(null)
 const openAfterSave = ref(false)
 const groupManagerVisible = ref(false)
+const cookieVisible = ref(false)
+const cookieProfile = ref(null)
+
+const DATA_ACTIONS = {
+  'clear-cache': {
+    title: 'Bersihkan Cache',
+    message: (name) => `Bersihkan cache profil "${name}"? Cache halaman, Code Cache, GPUCache, dan Service Worker akan dihapus.`,
+    confirm: 'Bersihkan',
+    verb: 'membersihkan cache',
+    run: (id) => api.clearCache(id),
+    success: (name) => `Cache profil "${name}" dibersihkan`,
+  },
+  'clear-cache-cookies': {
+    title: 'Bersihkan Cache dan Cookie',
+    message: (name) => `Bersihkan cache dan cookie profil "${name}"? Semua sesi login di profil ini akan hilang.`,
+    confirm: 'Bersihkan',
+    verb: 'membersihkan cache dan cookie',
+    run: (id) => api.clearCacheAndCookies(id),
+    success: (name) => `Cache dan cookie profil "${name}" dibersihkan`,
+  },
+  'clear-cache-extensions': {
+    title: 'Bersihkan Cache',
+    message: (name) => `Bersihkan cache profil "${name}"? Data extension tetap disimpan.`,
+    confirm: 'Bersihkan',
+    verb: 'membersihkan cache',
+    run: (id) => api.clearCacheKeepExtensions(id),
+    success: (name) => `Cache profil "${name}" dibersihkan, extension dipertahankan`,
+  },
+  'clear-password': {
+    title: 'Hapus Password Tersimpan',
+    message: (name) => `Hapus password tersimpan profil "${name}"? Isian login yang tersimpan di browser akan dihapus.`,
+    confirm: 'Hapus',
+    verb: 'menghapus password tersimpan',
+    run: (id) => api.clearSavedPassword(id),
+    success: (name) => `Password tersimpan profil "${name}" dihapus`,
+  },
+}
 
 let searchTimer = null
 let pollTimer = null
@@ -274,8 +312,44 @@ async function removeProfile(profile) {
   }
 }
 
+function openCookie(profile) {
+  cookieProfile.value = profile
+  cookieVisible.value = true
+}
+
+async function runDataAction(profile, key) {
+  const action = DATA_ACTIONS[key]
+  if (!action) return
+  try {
+    await ElMessageBox.confirm(action.message(profile.name), action.title, {
+      type: 'warning',
+      confirmButtonText: action.confirm,
+      cancelButtonText: 'Batal',
+      confirmButtonClass: 'el-button--danger',
+    })
+  } catch {
+    return
+  }
+  try {
+    await action.run(profile.profile_id)
+    ElMessage.success(action.success(profile.name))
+  } catch (error) {
+    ElMessage.error(`Gagal ${action.verb}: ${error.message}`)
+  } finally {
+    await pollOpened()
+  }
+}
+
 function onRowCommand(command, profile) {
-  if (command === 'delete') removeProfile(profile)
+  if (command === 'delete') {
+    removeProfile(profile)
+    return
+  }
+  if (command === 'cookie') {
+    openCookie(profile)
+    return
+  }
+  if (DATA_ACTIONS[command]) runDataAction(profile, command)
 }
 
 async function runBulk(command) {
@@ -652,7 +726,14 @@ useOnRefresh(() => refreshAll())
                 <el-button size="small" class="icon-action" :icon="MoreFilled" aria-label="Operasi lain" />
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item command="delete" :icon="Delete">Hapus</el-dropdown-item>
+                    <el-dropdown-item command="cookie" :icon="Files">Cookie</el-dropdown-item>
+                    <el-dropdown-item command="clear-cache" :icon="Brush" divided>Bersihkan cache</el-dropdown-item>
+                    <el-dropdown-item command="clear-cache-cookies" :icon="Brush">Bersihkan cache + cookie</el-dropdown-item>
+                    <el-dropdown-item command="clear-cache-extensions" :icon="Brush">
+                      Bersihkan cache (simpan extension)
+                    </el-dropdown-item>
+                    <el-dropdown-item command="clear-password" :icon="Key" divided>Hapus password tersimpan</el-dropdown-item>
+                    <el-dropdown-item command="delete" :icon="Delete" divided>Hapus</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -700,5 +781,11 @@ useOnRefresh(() => refreshAll())
     />
 
     <GroupManager v-model="groupManagerVisible" @changed="onGroupsChanged" />
+
+    <CookieDialog
+      v-model="cookieVisible"
+      :profile="cookieProfile"
+      :profile-open="cookieProfile ? isOpen(cookieProfile) : false"
+    />
   </div>
 </template>

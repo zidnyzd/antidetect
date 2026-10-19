@@ -956,6 +956,66 @@ button {
   width: 180px;
 }
 
+.cookie-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px 4px;
+}
+
+.cookie-alert {
+  margin: 0;
+}
+
+.cookie-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cookie-toolbar .el-button + .el-button {
+  margin-left: 0;
+}
+
+.cookie-file-input {
+  display: none;
+}
+
+.cookie-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ix-text-secondary);
+}
+
+.cookie-meta strong {
+  font-weight: 600;
+  color: var(--ix-text);
+}
+
+.cookie-meta-sep {
+  color: var(--ix-muted);
+}
+
+.cookie-meta-error {
+  margin-left: auto;
+  color: var(--ix-danger);
+}
+
+.cookie-meta-hint {
+  margin-left: auto;
+  color: var(--ix-muted);
+}
+
+.cookie-editor textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  tab-size: 2;
+}
+
 .field-260 {
   width: 260px;
 }

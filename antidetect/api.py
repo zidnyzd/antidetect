@@ -3,7 +3,7 @@ import json
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import launcher, store
+from . import cookies, launcher, store
 
 ACTIONS = {}
 
@@ -174,6 +174,43 @@ def profile_random_fingerprint(params):
         seed = launcher.rand_seed()
         store.update_profile(conn, pid, {"seed": seed})
         return {"profile_id": pid, "fingerprint_config": store._loads(row["fingerprint_config"])}
+
+
+def _known_pid(params):
+    pid = _pid(params)
+    with store.db() as conn:
+        if not store.profile_get(conn, pid):
+            raise ApiError(1002, "profile not found")
+    return pid
+
+
+@action("profile-get-cookies")
+def profile_get_cookies(params):
+    pid = _known_pid(params)
+    try:
+        return cookies.get_cookies(pid)
+    except cookies.CookieError as error:
+        raise ApiError(1004, str(error))
+
+
+@action("profile-update-cookies")
+def profile_update_cookies(params):
+    pid = _known_pid(params)
+    if "cookie" not in params:
+        raise ApiError(1000, "cookie is required")
+    try:
+        return cookies.update_cookies(pid, params.get("cookie"))
+    except cookies.CookieError as error:
+        raise ApiError(1004, str(error))
+
+
+@action("profile-clear-saved-user-password")
+def profile_clear_saved_user_password(params):
+    pid = _known_pid(params)
+    try:
+        return cookies.clear_saved_passwords(pid)
+    except cookies.CookieError as error:
+        raise ApiError(1004, str(error))
 
 
 def _clear_cache(pid, with_cookies=False):
