@@ -33,6 +33,8 @@ export const api = {
   closeProfiles: (ids) => call('profile-close-in-batches', { profile_id: [...ids] }),
   openedList: () => call('profile-opened-list'),
   groups: () => call('group-list', { page: 1, limit: 100 }),
+  tags: (params = {}) => call('tag-list', { page: 1, limit: 200, ...params }),
+  createTag: (title) => call('tag-create', { title }),
 
   proxies: (params = {}) => call('proxy-list', clean({ page: 1, limit: 10, ...params })),
   createProxy: (proxy) => call('proxy-create', proxy),

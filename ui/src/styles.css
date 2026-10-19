@@ -630,6 +630,47 @@ button {
   color: var(--ix-primary);
 }
 
+.tag-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 24px;
+  overflow: hidden;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tag-chip {
+  flex: 0 0 auto;
+  max-width: 80px;
+  min-width: 0;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #f2f3f5;
+  color: var(--ix-text-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-more {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--ix-muted);
+}
+
+.tag-add {
+  font-size: 12px;
+  color: var(--ix-primary);
+}
+
+.tag-add:hover {
+  text-decoration: underline;
+}
+
 .status-text {
   display: inline-flex;
   align-items: center;

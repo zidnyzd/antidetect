@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     proxy_config TEXT,
     fingerprint_config TEXT,
     preference_config TEXT,
+    tag_ids TEXT DEFAULT '[]',
     seed INTEGER,
     created_at TEXT,
     updated_at TEXT
@@ -68,6 +69,9 @@ def db():
 def init():
     with db() as conn:
         conn.executescript(SCHEMA)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(profiles)")}
+        if "tag_ids" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN tag_ids TEXT DEFAULT '[]'")
         if not conn.execute("SELECT 1 FROM groups LIMIT 1").fetchone():
             conn.execute("INSERT INTO groups (title, sort) VALUES ('Default', 0)")
         conn.commit()
@@ -84,6 +88,26 @@ def _loads(value):
         return {}
 
 
+def _load_list(value):
+    try:
+        data = json.loads(value) if value else []
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _int_list(value):
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def profile_to_dict(row, include_seed=False):
     data = {
         "profile_id": row["id"],
@@ -96,6 +120,7 @@ def profile_to_dict(row, include_seed=False):
         "proxy_config": _loads(row["proxy_config"]),
         "fingerprint_config": _loads(row["fingerprint_config"]),
         "preference_config": _loads(row["preference_config"]),
+        "tab_id": _load_list(row["tag_ids"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -130,11 +155,12 @@ def list_profiles(conn, page=1, limit=10, group_id=None, name=None, profile_id=N
 
 def create_profile(conn, data):
     ts = now()
+    tag_ids = _int_list(data.get("tab_id", data.get("tag_ids")))
     cur = conn.execute(
         """INSERT INTO profiles
            (name, group_id, color, note, site_id, site_url,
-            proxy_config, fingerprint_config, preference_config, seed, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            proxy_config, fingerprint_config, preference_config, tag_ids, seed, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             data.get("name") or "Profile",
             data.get("group_id") or 1,
@@ -145,6 +171,7 @@ def create_profile(conn, data):
             json.dumps(data.get("proxy_config") or {}),
             json.dumps(data.get("fingerprint_config") or {}),
             json.dumps(data.get("preference_config") or {}),
+            json.dumps(tag_ids),
             int(data.get("seed") or secrets.randbelow(2**31 - 1) + 1),
             ts,
             ts,
@@ -164,6 +191,10 @@ def update_profile(conn, profile_id, data):
         if data.get(key) is not None:
             fields.append(f"{key} = ?")
             args.append(json.dumps(data[key]))
+    tag_source = next((key for key in ("tab_id", "tag_id", "tag_ids") if key in data), None)
+    if tag_source:
+        fields.append("tag_ids = ?")
+        args.append(json.dumps(_int_list(data[tag_source])))
     if data.get("seed"):
         fields.append("seed = ?")
         args.append(int(data["seed"]))

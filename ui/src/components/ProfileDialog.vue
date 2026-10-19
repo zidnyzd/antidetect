@@ -7,8 +7,9 @@ const props = defineProps({
   modelValue: { type: Boolean, default: false },
   profile: { type: Object, default: null },
   groups: { type: Array, default: () => [] },
+  tags: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['update:modelValue', 'saved'])
+const emit = defineEmits(['update:modelValue', 'saved', 'tags-changed'])
 
 const COLORS = ['#2f6fed', '#16a34a', '#f59e0b', '#d92d20', '#a855f7', '#14b8a6', '#e879f9', '#64748b']
 const TIMEZONES = [
@@ -37,6 +38,7 @@ function emptyForm() {
   return {
     name: '',
     group_id: props.groups[0]?.id ?? 1,
+    tag_id: [],
     color: COLORS[0],
     note: '',
     site_url: '',
@@ -75,6 +77,7 @@ function fillFromProfile(profile) {
   const proxy = profile.proxy_config || {}
   form.name = profile.name || ''
   form.group_id = profile.group_id ?? form.group_id
+  form.tag_id = Array.isArray(profile.tab_id) ? [...profile.tab_id] : []
   form.color = profile.color || COLORS[0]
   form.note = profile.note || ''
   form.site_url = profile.site_url || ''
@@ -181,11 +184,12 @@ function proxyPayload() {
   }
 }
 
-function formPayload() {
+function formPayload(tagIds = form.tag_id) {
   const url = form.site_url.trim()
   return {
     name: form.name.trim(),
     group_id: form.group_id,
+    tag_id: [...(tagIds || [])],
     color: form.color,
     note: form.note.trim() || null,
     site_id: url ? 21 : 22,
@@ -194,6 +198,30 @@ function formPayload() {
     fingerprint_config: fingerprintPayload(),
     preference_config: {},
   }
+}
+
+async function resolveTagIds() {
+  const ids = []
+  let created = false
+  for (const value of form.tag_id || []) {
+    if (typeof value === 'number') {
+      if (!ids.includes(value)) ids.push(value)
+      continue
+    }
+    const title = String(value).trim()
+    if (!title) continue
+    const existing = props.tags.find((tag) => tag.title.toLowerCase() === title.toLowerCase())
+    if (existing) {
+      if (!ids.includes(existing.id)) ids.push(existing.id)
+      continue
+    }
+    const result = await api.createTag(title)
+    if (!ids.includes(result.id)) ids.push(result.id)
+    created = true
+  }
+  form.tag_id = ids
+  if (created) emit('tags-changed')
+  return ids
 }
 
 function stable(value) {
@@ -208,8 +236,8 @@ function same(a, b) {
   return JSON.stringify(stable(a)) === JSON.stringify(stable(b))
 }
 
-function buildChanges() {
-  const payload = formPayload()
+function buildChanges(tagIds) {
+  const payload = formPayload(tagIds)
   const changes = { profile_id: props.profile.profile_id }
   for (const key of Object.keys(payload)) {
     if (!same(payload[key], initialPayload ? initialPayload[key] : undefined)) changes[key] = payload[key]
@@ -225,8 +253,9 @@ async function submit() {
   if (!validateForm()) return
   busy.value = true
   try {
+    const tagIds = await resolveTagIds()
     if (isEdit.value) {
-      const changes = buildChanges()
+      const changes = buildChanges(tagIds)
       if (Object.keys(changes).length <= 1) {
         ElMessage.info('Tidak ada perubahan untuk disimpan')
         close()
@@ -236,7 +265,7 @@ async function submit() {
       emit('saved', { mode: 'edit', profileId: props.profile.profile_id, name: form.name.trim() })
       close()
     } else {
-      const payload = formPayload()
+      const payload = formPayload(tagIds)
       const result = await api.createProfile(payload)
       emit('saved', { mode: 'create', profileId: result.profile_id, name: payload.name })
       close()
@@ -275,9 +304,21 @@ function clearProxyErrors() {
               <el-option v-for="group in groups" :key="group.id" :label="group.title" :value="group.id" />
             </el-select>
           </el-form-item>
+          <el-form-item label="Tag">
+            <el-select
+              v-model="form.tag_id"
+              multiple
+              filterable
+              allow-create
+              default-first-option
+              placeholder="Pilih atau buat tag"
+            >
+              <el-option v-for="tag in tags" :key="tag.id" :label="tag.title" :value="tag.id" />
+            </el-select>
+          </el-form-item>
         </el-form>
         <p class="form-hint">
-          Platform, fingerprint, dan proxy diatur di tab berikutnya. Nama dan grup dipakai untuk mengenali profil di
+          Platform, fingerprint, dan proxy diatur di tab berikutnya. Nama, grup, dan tag dipakai untuk mengenali profil di
           daftar.
         </p>
       </el-tab-pane>

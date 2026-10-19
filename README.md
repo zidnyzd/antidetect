@@ -37,8 +37,8 @@ venv/bin/python scripts/selftest.py
 - [x] proxy dengan autentikasi user/password via jembatan gost (http/https/socks5)
 - [x] fingerprint: platform, system_version, cores, memory, timezone, language, brand
 - [x] selenium/chromedriver attach (kontrak `webdriver` + `debugging_address`)
-- [x] UI: daftar profil, buat/edit 4 tab, buka/tutup, duplikat/hapus, filter,
-  pagination, halaman proxy dan pengaturan
+- [x] UI: daftar profil, buat/edit 4 tab, tag per profil, buka/tutup,
+  duplikat/hapus, filter, pagination, halaman proxy dan pengaturan
 - [ ] import/export cookie, extensions
 
 ## Pemetaan fingerprint_config ke flag engine
@@ -144,8 +144,8 @@ npm run build      # hasil produksi ke ui/dist
 ```
 
 Butuh Node.js 18+. Alur yang sudah diuji lewat UI: buat, edit, duplikat, hapus,
-buka/tutup profil, filter status dan grup, pencarian, pagination, serta CRUD
-proxy. Shell desktop (Tauri/Electron) menyusul.
+buka/tutup profil, tag per profil, filter status dan grup, pencarian, pagination,
+serta CRUD proxy. Shell desktop (Tauri/Electron) menyusul.
 
 ## Lisensi
 

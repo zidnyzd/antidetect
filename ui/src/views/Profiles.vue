@@ -12,6 +12,7 @@ const rows = ref([])
 const pool = ref([])
 const total = ref(0)
 const groups = ref([])
+const tags = ref([])
 const opened = ref(new Set())
 const loading = ref(false)
 const selected = ref([])
@@ -31,6 +32,7 @@ let searchTimer = null
 let pollTimer = null
 
 const groupMap = computed(() => new Map(groups.value.map((group) => [group.id, group.title])))
+const tagMap = computed(() => new Map(tags.value.map((tag) => [tag.id, tag.title])))
 const selectedIds = computed(() => selected.value.map((profile) => profile.profile_id))
 
 function isOpen(profile) {
@@ -87,6 +89,15 @@ async function loadGroups() {
   }
 }
 
+async function loadTags() {
+  try {
+    const result = await api.tags()
+    tags.value = result.data || []
+  } catch (error) {
+    ElMessage.error(`Gagal memuat tag: ${error.message}`)
+  }
+}
+
 async function pollOpened() {
   try {
     const list = await api.openedList()
@@ -97,7 +108,7 @@ async function pollOpened() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadGroups(), loadProfiles(), pollOpened()])
+  await Promise.all([loadGroups(), loadProfiles(), loadTags(), pollOpened()])
 }
 
 function clearSelection() {
@@ -344,7 +355,7 @@ async function runBulk(command) {
 async function onSaved({ mode, profileId, name }) {
   dialogVisible.value = false
   clearSelection()
-  await loadProfiles()
+  await Promise.all([loadProfiles(), loadTags()])
   await pollOpened()
   ElMessage.success(mode === 'create' ? `Profil "${name}" dibuat` : `Profil "${name}" diperbarui`)
   if (openAfterSave.value && mode === 'create') {
@@ -355,6 +366,11 @@ async function onSaved({ mode, profileId, name }) {
 
 function groupTitle(groupId) {
   return groupMap.value.get(groupId) || `Grup ${groupId}`
+}
+
+function profileTags(profile) {
+  const ids = Array.isArray(profile.tab_id) ? profile.tab_id : []
+  return ids.map((id) => tagMap.value.get(id)).filter(Boolean)
 }
 
 function platformLabel(profile) {
@@ -489,7 +505,7 @@ useOnRefresh(() => refreshAll())
         @selection-change="onSelectionChange"
       >
         <el-table-column type="selection" width="44" />
-        <el-table-column label="No." width="84" sortable :sort-method="sortByProfileId">
+        <el-table-column label="No." width="76" sortable :sort-method="sortByProfileId">
           <template #default="{ row }">
             <span
               class="profile-badge"
@@ -497,7 +513,7 @@ useOnRefresh(() => refreshAll())
             >{{ row.profile_id }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Grup / Platform" width="150">
+        <el-table-column label="Grup / Platform" width="130">
           <template #default="{ row }">
             <div class="cell-stack">
               <span class="cell-main">{{ groupTitle(row.group_id) }}</span>
@@ -505,7 +521,23 @@ useOnRefresh(() => refreshAll())
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Judul Profil" min-width="220">
+        <el-table-column label="Tag" width="170">
+          <template #default="{ row }">
+            <div class="tag-cell" role="button" tabindex="0" @click="openEdit(row)" @keydown.enter="openEdit(row)">
+              <template v-if="profileTags(row).length">
+                <span
+                  v-for="tag in profileTags(row).slice(0, 2)"
+                  :key="tag"
+                  class="tag-chip"
+                  :title="tag"
+                >{{ tag }}</span>
+                <span v-if="profileTags(row).length > 2" class="tag-more">+{{ profileTags(row).length - 2 }}</span>
+              </template>
+              <span v-else class="tag-add">Tambah tag</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="Judul Profil" min-width="180">
           <template #default="{ row }">
             <div class="cell-stack">
               <button type="button" class="profile-name" @click="openEdit(row)">{{ row.name }}</button>
@@ -513,7 +545,7 @@ useOnRefresh(() => refreshAll())
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Proxy" width="200">
+        <el-table-column label="Proxy" width="170">
           <template #default="{ row }">
             <div class="cell-stack">
               <span class="cell-main">{{ proxyTypeLabel(row) }}</span>
@@ -521,7 +553,7 @@ useOnRefresh(() => refreshAll())
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Status" width="100">
+        <el-table-column label="Status" width="90">
           <template #default="{ row }">
             <span :class="['status-text', isOpen(row) ? 'is-open' : 'is-closed']">
               <span :class="['status-dot', isOpen(row) ? 'ok' : 'idle']"></span>
@@ -529,7 +561,7 @@ useOnRefresh(() => refreshAll())
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="Dibuat" width="140">
+        <el-table-column label="Dibuat" width="120">
           <template #default="{ row }">
             <div class="cell-stack">
               <span class="cell-main">{{ createdAtParts(row.created_at).date }}</span>
@@ -537,7 +569,7 @@ useOnRefresh(() => refreshAll())
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Operasi" width="230" fixed="right">
+        <el-table-column label="Operasi" width="210" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
               <el-button
@@ -603,6 +635,13 @@ useOnRefresh(() => refreshAll())
       </div>
     </section>
 
-    <ProfileDialog v-model="dialogVisible" :profile="editingProfile" :groups="groups" @saved="onSaved" />
+    <ProfileDialog
+      v-model="dialogVisible"
+      :profile="editingProfile"
+      :groups="groups"
+      :tags="tags"
+      @saved="onSaved"
+      @tags-changed="loadTags"
+    />
   </div>
 </template>
