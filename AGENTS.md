@@ -14,6 +14,7 @@
 - Engine: ~/.local/share/antidetect/squashfs-root/opt/ungoogled-chromium/chrome (fingerprint-chromium 150, chromedriver di folder sama).
 - Venv: ./venv (sudah berisi ixbrowser-local-api dan selenium).
 - DISPLAY=:0 (desktop nyata). Boleh membuka Chrome headed, selalu tutup kembali setelah tes.
+- Frontend di `ui/` (Vue 3 + Element Plus + Vite). Dev: `cd ui && npm install && npm run dev` di 127.0.0.1:5180; dev server mem-proxy `/api` dan `/health` ke server.
 - Server dev berjalan di 127.0.0.1:53200. Setelah mengubah antidetect/*.py, restart server:
   `PID=$(ss -ltnp | grep ':53200' | grep -oP 'pid=[0-9]+' | head -1 | cut -d= -f2); [ -n "$PID" ] && kill "$PID"; sleep 1; cd /home/zdna/Projects/antidetect && (setsid nohup ./venv/bin/python -m antidetect serve >/home/zdna/.hermes/cache/scratch/antidetect-serve.log 2>&1 &); sleep 2; curl -s http://127.0.0.1:53200/health`
 

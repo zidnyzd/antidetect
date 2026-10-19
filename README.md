@@ -125,6 +125,19 @@ Restart=on-failure
 WantedBy=default.target
 ```
 
+## UI (prototype)
+
+Frontend prototype di `ui/`: Vue 3 + Element Plus + Vite, berbicara ke API lokal yang sama
+(dev server mem-proxy `/api` dan `/health` ke `127.0.0.1:53200`).
+
+```bash
+cd ui
+npm install
+npm run dev        # http://127.0.0.1:5180
+```
+
+Butuh Node.js 18+. Shell desktop (Tauri/Electron) menyusul setelah arah UI disetujui.
+
 ## Lisensi
 
 AGPL-3.0-only, lihat `LICENSE`. Engine fingerprint-chromium diunduh terpisah
