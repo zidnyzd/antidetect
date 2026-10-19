@@ -33,6 +33,9 @@ export const api = {
   closeProfiles: (ids) => call('profile-close-in-batches', { profile_id: [...ids] }),
   openedList: () => call('profile-opened-list'),
   groups: () => call('group-list', { page: 1, limit: 100 }),
+  createGroup: (group) => call('group-create', group),
+  updateGroup: (group) => call('group-update', group),
+  deleteGroup: (id) => call('group-delete', { id }),
   tags: (params = {}) => call('tag-list', { page: 1, limit: 200, ...params }),
   createTag: (title) => call('tag-create', { title }),
 

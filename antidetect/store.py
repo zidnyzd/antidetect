@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE TABLE IF NOT EXISTS groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
-    sort INTEGER NOT NULL DEFAULT 0
+    sort INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,6 +73,9 @@ def init():
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(profiles)")}
         if "tag_ids" not in columns:
             conn.execute("ALTER TABLE profiles ADD COLUMN tag_ids TEXT DEFAULT '[]'")
+        group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
+        if "created_at" not in group_columns:
+            conn.execute("ALTER TABLE groups ADD COLUMN created_at TEXT")
         if not conn.execute("SELECT 1 FROM groups LIMIT 1").fetchone():
             conn.execute("INSERT INTO groups (title, sort) VALUES ('Default', 0)")
         conn.commit()

@@ -217,15 +217,44 @@ def _paginated(conn, table, page, limit):
 @action("group-list")
 def group_list(params):
     with store.db() as conn:
-        return _paginated(conn, "groups", params.get("page") or 1, params.get("limit") or 100)
+        total = conn.execute("SELECT COUNT(*) AS c FROM groups").fetchone()["c"]
+        rows = conn.execute(
+            """SELECT id, title, sort, created_at,
+                      (SELECT COUNT(*) FROM profiles WHERE group_id = groups.id) AS profile_count
+               FROM groups
+               ORDER BY sort DESC, id ASC
+               LIMIT ? OFFSET ?""",
+            (
+                int(params.get("limit") or 100),
+                (int(params.get("page") or 1) - 1) * int(params.get("limit") or 100),
+            ),
+        ).fetchall()
+        return {"total": total, "data": [dict(row) for row in rows]}
+
+
+def _sort_value(params):
+    try:
+        return int(params.get("sort") or 0)
+    except (TypeError, ValueError):
+        raise ApiError(1000, "sort harus berupa bilangan bulat")
 
 
 @action("group-create")
 def group_create(params):
+    title = str(params.get("title") or "").strip()
+    if not title:
+        raise ApiError(1101, "Nama grup wajib diisi")
+    sort = _sort_value(params)
     with store.db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        duplicate = conn.execute(
+            "SELECT 1 FROM groups WHERE lower(title) = lower(?)", (title,)
+        ).fetchone()
+        if duplicate:
+            raise ApiError(1102, "Nama grup sudah dipakai")
         cur = conn.execute(
-            "INSERT INTO groups (title, sort) VALUES (?, ?)",
-            (params.get("title") or "Group", int(params.get("sort") or 0)),
+            "INSERT INTO groups (title, sort, created_at) VALUES (?, ?, ?)",
+            (title, sort, store.now()),
         )
         conn.commit()
         return {"id": cur.lastrowid}
@@ -233,19 +262,55 @@ def group_create(params):
 
 @action("group-update")
 def group_update(params):
+    gid = params.get("id")
+    if gid is None:
+        raise ApiError(1103, "Grup tidak ditemukan")
+    gid = int(gid)
     with store.db() as conn:
-        conn.execute(
-            "UPDATE groups SET title = COALESCE(?, title), sort = COALESCE(?, sort) WHERE id = ?",
-            (params.get("title"), params.get("sort"), int(params.get("id") or 0)),
-        )
-        conn.commit()
+        row = conn.execute("SELECT id FROM groups WHERE id = ?", (gid,)).fetchone()
+        if not row:
+            raise ApiError(1103, "Grup tidak ditemukan")
+
+        fields, args = [], []
+        if "title" in params:
+            title = str(params.get("title") or "").strip()
+            if not title:
+                raise ApiError(1101, "Nama grup wajib diisi")
+            duplicate = conn.execute(
+                "SELECT 1 FROM groups WHERE lower(title) = lower(?) AND id <> ?", (title, gid)
+            ).fetchone()
+            if duplicate:
+                raise ApiError(1102, "Nama grup sudah dipakai")
+            fields.append("title = ?")
+            args.append(title)
+        if "sort" in params:
+            fields.append("sort = ?")
+            args.append(_sort_value(params))
+        if fields:
+            args.append(gid)
+            conn.execute(f"UPDATE groups SET {', '.join(fields)} WHERE id = ?", args)
+            conn.commit()
         return True
 
 
 @action("group-delete")
 def group_delete(params):
+    gid = params.get("id")
+    if gid is None:
+        raise ApiError(1103, "Grup tidak ditemukan")
+    gid = int(gid)
     with store.db() as conn:
-        conn.execute("DELETE FROM groups WHERE id = ?", (int(params.get("id") or 0),))
+        row = conn.execute("SELECT id, title FROM groups WHERE id = ?", (gid,)).fetchone()
+        if not row:
+            raise ApiError(1103, "Grup tidak ditemukan")
+        if gid == 1 or row["title"] == "Default":
+            raise ApiError(1104, "Grup Default tidak bisa dihapus")
+        count = conn.execute(
+            "SELECT COUNT(*) AS c FROM profiles WHERE group_id = ?", (gid,)
+        ).fetchone()["c"]
+        if count > 0:
+            raise ApiError(1105, f"Grup masih berisi {count} profil, pindahkan dulu")
+        conn.execute("DELETE FROM groups WHERE id = ?", (gid,))
         conn.commit()
         return True
 

@@ -769,6 +769,90 @@ button {
   font-size: 13px;
 }
 
+/* Group manager */
+
+.group-manager .group-manager-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--ix-border-light);
+}
+
+.group-manager .group-search {
+  width: 280px;
+}
+
+.group-manager .group-table {
+  --el-table-border-color: var(--ix-border-light);
+  --el-table-header-bg-color: #fafbfc;
+  --el-table-header-text-color: var(--ix-text-secondary);
+  --el-table-text-color: var(--ix-text);
+  --el-table-row-hover-bg-color: #f7f9fc;
+  color: var(--ix-text);
+  font-size: 13px;
+}
+
+.group-manager .group-table::before,
+.group-manager .group-table .el-table__inner-wrapper::before {
+  display: none;
+}
+
+.group-manager .group-table th.el-table__cell {
+  height: 44px;
+  padding: 0;
+  background: #fafbfc;
+  border-bottom: 1px solid var(--ix-border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ix-text-secondary);
+}
+
+.group-manager .group-table td.el-table__cell {
+  height: 54px;
+  padding: 0;
+  border-bottom: 1px solid var(--ix-border-light);
+}
+
+.group-manager .group-table .el-table__cell .cell {
+  padding: 0 12px;
+  line-height: 1.35;
+  min-width: 0;
+}
+
+.group-manager .group-table .el-table-fixed-column--right {
+  background: var(--ix-surface);
+}
+
+.group-manager .group-table .el-table__row:hover .el-table-fixed-column--right {
+  background: #f7f9fc;
+}
+
+.group-manager .group-table .row-actions {
+  gap: 6px;
+}
+
+.group-manager .group-table .icon-action {
+  width: 30px;
+  height: 30px;
+}
+
+.group-delete-wrap {
+  display: inline-flex;
+}
+
+.group-manager-footer {
+  padding: 10px 20px;
+  border-top: 1px solid var(--ix-border-light);
+  font-size: 12px;
+  color: var(--ix-muted);
+}
+
+.group-form .form-hint {
+  margin-top: 6px;
+}
+
 /* Dialog */
 
 .el-dialog {

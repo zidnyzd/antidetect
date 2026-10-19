@@ -37,8 +37,8 @@ venv/bin/python scripts/selftest.py
 - [x] proxy dengan autentikasi user/password via jembatan gost (http/https/socks5)
 - [x] fingerprint: platform, system_version, cores, memory, timezone, language, brand
 - [x] selenium/chromedriver attach (kontrak `webdriver` + `debugging_address`)
-- [x] UI: daftar profil, buat/edit 4 tab, tag per profil, buka/tutup,
-  duplikat/hapus, filter, pagination, halaman proxy dan pengaturan
+- [x] UI: daftar profil, buat/edit 4 tab, tag per profil, kelola grup,
+  buka/tutup, duplikat/hapus, filter, pagination, halaman proxy dan pengaturan
 - [ ] import/export cookie, extensions
 
 ## Pemetaan fingerprint_config ke flag engine
@@ -134,7 +134,9 @@ Frontend di `ui/`: Vue 3 + Element Plus + Vite. Layout mengikuti ixBrowser
 2.10.18: sidebar gelap 210 px, topbar putih 50 px, kanvas terang, tabel profil
 dengan toolbar dua baris, dan dialog Buat/Edit Profil 4 tab (Akun Platform,
 Konfigurasi Proxy, Fingerprint, Preferensi). Halaman Proxy dan Pengaturan juga
-aktif.
+aktif. Tombol di samping filter grup membuka kelola grup: tambah, edit nama dan
+urutan, cari, serta hapus. Grup Default dan grup yang masih berisi profil
+dilindungi dari penghapusan.
 
 ```bash
 cd ui
@@ -144,8 +146,8 @@ npm run build      # hasil produksi ke ui/dist
 ```
 
 Butuh Node.js 18+. Alur yang sudah diuji lewat UI: buat, edit, duplikat, hapus,
-buka/tutup profil, tag per profil, filter status dan grup, pencarian, pagination,
-serta CRUD proxy. Shell desktop (Tauri/Electron) menyusul.
+buka/tutup profil, tag per profil, kelola grup, filter status dan grup,
+pencarian, pagination, serta CRUD proxy. Shell desktop (Tauri/Electron) menyusul.
 
 ## Lisensi
 

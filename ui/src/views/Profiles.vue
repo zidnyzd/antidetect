@@ -1,10 +1,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, CopyDocument, Delete, Edit, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { ArrowDown, CopyDocument, Delete, Edit, FolderOpened, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
 import ProfileDialog from '../components/ProfileDialog.vue'
+import GroupManager from '../components/GroupManager.vue'
 
 const POOL_LIMIT = 1000
 
@@ -27,6 +28,7 @@ const tableRef = ref(null)
 const dialogVisible = ref(false)
 const editingProfile = ref(null)
 const openAfterSave = ref(false)
+const groupManagerVisible = ref(false)
 
 let searchTimer = null
 let pollTimer = null
@@ -352,6 +354,15 @@ async function runBulk(command) {
   }
 }
 
+async function onGroupsChanged() {
+  await loadGroups()
+  if (groupFilter.value !== 'all' && !groups.value.some((group) => group.id === groupFilter.value)) {
+    groupFilter.value = 'all'
+    return
+  }
+  await loadProfiles()
+}
+
 async function onSaved({ mode, profileId, name }) {
   dialogVisible.value = false
   clearSelection()
@@ -463,6 +474,14 @@ useOnRefresh(() => refreshAll())
               <el-option label="Semua Grup" value="all" />
               <el-option v-for="group in groups" :key="group.id" :label="group.title" :value="group.id" />
             </el-select>
+            <el-tooltip content="Kelola grup" placement="top" :show-after="200">
+              <el-button
+                class="icon-action"
+                :icon="FolderOpened"
+                aria-label="Kelola grup"
+                @click="groupManagerVisible = true"
+              />
+            </el-tooltip>
             <el-tooltip content="Muat ulang daftar" placement="top" :show-after="200">
               <el-button class="icon-action" :icon="Refresh" aria-label="Muat ulang daftar" @click="refreshAll" />
             </el-tooltip>
@@ -643,5 +662,7 @@ useOnRefresh(() => refreshAll())
       @saved="onSaved"
       @tags-changed="loadTags"
     />
+
+    <GroupManager v-model="groupManagerVisible" @changed="onGroupsChanged" />
   </div>
 </template>
