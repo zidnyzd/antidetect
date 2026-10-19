@@ -83,12 +83,15 @@ def main():
     sb.set_cookie("B")
     print("B tz:", fp_b["tz"], "| cores:", fp_b["cores"], "| gl:", fp_b["glRenderer"][:60])
     print("B cookie:", sb.cookies())
-    assert "A" not in sb.cookies().replace("marker=B", ""), "cookie A leaked into B"
+    assert "marker=A" not in sb.cookies(), "cookie A leaked into B"
+    assert "marker=B" in sb.cookies(), "cookie B missing in B"
     sb.close()
 
     sa2 = Session(client, a)
     sa2.goto(SITE)
-    print("A cookie after reopen:", sa2.cookies())
+    cookies_a2 = sa2.cookies()
+    print("A cookie after reopen:", cookies_a2)
+    assert "marker=A" in cookies_a2, "cookie A not persisted by graceful close"
     sa2.close()
 
     print("PASS: fingerprints differ, cookies isolated and persistent")
