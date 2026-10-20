@@ -2,6 +2,7 @@
 
 ## Bahasa & gaya
 - Bahasa Indonesia. Tanpa em dash, gunakan koma, titik, titik dua.
+- Dilarang karakter CJK (Tionghoa, Hiragana, Katakana, Hangul) dan Cyrillic di kode, komentar, string UI, dan dokumen. Balas dalam bahasa Indonesia, atau bahasa Inggris untuk istilah teknis saja. Jangan menyisipkan kata dari bahasa lain secara tak sengaja.
 - Komentar kode minimal: jelaskan alasan bila tidak jelas, jangan mengulang kode.
 - Anti slop: tanpa klise marketing, tanpa kalimat pengisi.
 
