@@ -52,8 +52,10 @@ venv/bin/python scripts/selftest.py
   argumen startup yang divalidasi (flag berbahaya ditolak)
 - [x] kelola extension lokal (unggah zip/crx, daftar, hapus dengan proteksi
   pemakaian) dan pemilihan extension per profil
-- [x] info engine/kernel di Pengaturan, acak seed, kolom GPU Vendor/Renderer
-  dan opsi tampilkan GPU host (binary 150 belum menerapkan flag GPU)
+- [x] info engine/kernel di Pengaturan, acak seed, GPU vendor dan renderer
+  otomatis dari seed fingerprint (engine 150 tidak menerima nilai manual)
+- [x] multi-select "Matikan spoofing" (font, audio, canvas, clientrects, gpu)
+  yang dikirim ke engine sebagai `--disable-spoofing`
 - [x] ekspor/impor profil (JSON), kelola bookmark (tambah/hapus) dan hapus
   password tersimpan per entri
 - [x] ekspor profil terenkripsi kata sandi (AES-256, minimal 8 karakter)
@@ -64,7 +66,8 @@ venv/bin/python scripts/selftest.py
 - [x] log Chrome/Proxy per profil (2000 baris terakhir, batas 1 MB)
 - [x] pilih kernel per profil dari folder `kernels/<nama>/chrome` dengan
   validasi path dan fallback ke engine bawaan
-- [ ] penegakan fingerprint GPU di engine (binary 150 tidak punya flag GPU)
+- [x] impor profil CSV: satu baris jadi satu profil, grup dan proxy baru
+  dibuat otomatis, laporan per baris
 
 ## Pemetaan fingerprint_config ke flag engine
 
@@ -77,10 +80,16 @@ venv/bin/python scripts/selftest.py
 | `br_version` | `--fingerprint-brand-version=<versi>` | versi brand di UA-CH |
 | `language` | `--lang`, `--accept-lang` | `navigator.language` dan header `Accept-Language` |
 | `timezone` | `--timezone=<zona>` | zona waktu JS |
-| seed profil | `--fingerprint=<seed>` | seed internal engine, sumber konsistensi kanvas/WebGL/fonts |
+| seed profil | `--fingerprint=<seed>` | seed internal engine, sumber konsistensi kanvas/WebGL/fonts dan GPU vendor/renderer |
+| `disable_spoofing` (`font`, `audio`, `canvas`, `clientrects`, `gpu`) | `--disable-spoofing=<nama,nama>` | komponen yang memakai nilai asli host; `gpu` berarti GPU host |
 
 `system_version` dan `device_memory` hanya diterapkan bila ada isinya; keduanya
 terverifikasi berpengaruh lewat `assets/fptest.html` (lihat NOTES-1.md).
+
+GPU vendor dan renderer tidak punya input manual: engine membangkitkannya dari
+seed fingerprint. Nilai `disable_spoofing` dikirim apa adanya sebagai daftar
+comma separated ke `--disable-spoofing`, dan API menolak nama di luar lima
+komponen di atas dengan kode 1000.
 
 ## Proxy dengan autentikasi
 
@@ -108,6 +117,32 @@ scripts/fetch-gost.sh        # butuh gh atau curl; memasang ke ~/.local/bin/gost
 proxy auth tanpa keluar lewat proxy internet: `scripts/test-auth-proxy.py`
 (proxy CONNECT lokal yang menuntut Basic auth, kredensial benar dan salah).
 
+## Impor profil CSV
+
+Tombol "Impor CSV" di toolbar daftar profil menerima file CSV datar. Satu baris
+data jadi satu profil, dan kolom yang dibaca:
+
+| kolom | keterangan |
+| --- | --- |
+| `name` | wajib, nama profil, maksimal 100 karakter |
+| `group` | nama grup, profil baru masuk ke grup itu; grup yang belum ada dibuat otomatis |
+| `note` | catatan profil, maksimal 200 karakter |
+| `platform` | `Windows` atau `Macos`, default `Windows` |
+| `system_version` | versi sesuai platform, default versi terbaru platform tersebut |
+| `proxy_type` | `direct`, `http`, `https`, atau `socks5` |
+| `proxy_ip`, `proxy_port` | alamat proxy, port 1 sampai 65535 |
+| `proxy_user`, `proxy_password` | kredensial proxy, opsional |
+| `site_url` | URL awal profil, harus diawali `http://` atau `https://` |
+
+Kolom lain diabaikan. Batas file 1 MB dan 500 baris data, dan header wajib
+memuat kolom `name`. Proxy yang belum ada di daftar proxy dibuat otomatis,
+begitu juga grup baru. Satu baris bermasalah tidak membatalkan baris lain:
+hasil impor menampilkan jumlah profil dibuat, grup baru, proxy baru, dan daftar
+error per nomor baris.
+
+Backend memakai action `profile-import-csv` dengan payload
+`{"text": "<isi file csv>"}`.
+
 ## Yang belum didukung engine
 
 - `resolving_power` (lebar x tinggi layar). Flag `--fingerprint-screen-width`
@@ -118,9 +153,10 @@ proxy auth tanpa keluar lewat proxy internet: `scripts/test-auth-proxy.py`
   `window.devicePixelRatio` (tetap 1 di headless maupun headed).
 - Platform Android/iOS dan mode mobile (ua_type 2): engine hanya Windows/macOS.
 - Flag GPU `--fingerprint-gpu-vendor`, `--fingerprint-gpu-renderer`, dan
-  `--disable-gpu-fingerprint` tidak ada di binary 150. Nilai GPU Vendor/Renderer
-  tetap disimpan dan UI memberi peringatan, tetapi belum diterapkan engine.
-  Opsi tampilkan GPU host memakai `--disable-spoofing=gpu` bila tersedia.
+  `--disable-gpu-fingerprint` tidak ada di binary 150. GPU vendor dan renderer
+  dibuat engine dari seed fingerprint, jadi UI tidak menyediakan input manual.
+  Untuk memakai GPU asli host, centang GPU pada multi-select "Matikan
+  spoofing", yang dikirim sebagai `--disable-spoofing=gpu`.
 - Belum ada pengelola unduhan/update kernel; kernel tambahan harus diletakkan
   manual di `~/.local/share/antidetect/kernels/<nama>/chrome`, lalu dipilih
   per profil lewat tab Preferensi.
@@ -199,10 +235,21 @@ Impor Massal menerima lima format (komentar dan baris kosong diabaikan) dan
 menampilkan jumlah dibuat, duplikat dilewati, serta error per baris. Ekspor
 menghasilkan file teks, dengan pilihan menyertakan kredensial.
 
+Tab Fingerprint tidak punya input GPU vendor atau renderer. Keduanya dibuat
+otomatis dari seed fingerprint. Multi-select "Matikan spoofing" memilih
+komponen yang memakai nilai asli host (Font, Audio, Canvas, ClientRects, GPU),
+dan pilihan itu dikirim ke engine sebagai `--disable-spoofing`.
+
 Tab Preferensi menyimpan ukuran dan posisi jendela, switch buka DevTools, dan
 argumen startup Chromium. Argumen dipisah spasi; flag yang bisa merusak isolasi
 seperti `--user-data-dir`, `--proxy-server`, dan `--remote-debugging-port`
 ditolak saat disimpan.
+
+Tombol Impor CSV di toolbar daftar profil membuka dialog impor profil CSV.
+Dialog bisa mengunduh template berisi header dan satu baris contoh, memilih
+file CSV, lalu menampilkan jumlah profil dibuat, grup baru, proxy baru, dan
+daftar error per baris. Grup dan proxy yang disebut di CSV dibuat otomatis
+bila belum ada.
 
 Halaman Extension menyimpan extension lokal dari unggahan zip/crx, menampilkan
 versi dan ukurannya, serta menolak hapus selama masih dipakai profil. Tab
@@ -254,7 +301,8 @@ import/export, aksi cache, pemulihan keranjang sampah, operasi massal, cek
 proxy, pilih proxy tersimpan, atur jendela, filter tag, pilih kolom,
 ekspor/impor profil (termasuk terenkripsi), bookmark, password tersimpan,
 preset platform, dasbor,
-halaman API, log operasi, pilih kernel per profil, serta CRUD proxy. Shell
+halaman API, log operasi, pilih kernel per profil, CRUD proxy, multi-select
+"Matikan spoofing" pada tab Fingerprint, dan impor profil CSV. Shell
 desktop (Tauri/Electron) menyusul.
 
 ## Lisensi

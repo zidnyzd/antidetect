@@ -539,7 +539,14 @@ async function onCsvImported(result) {
   page.value = 1
   clearSelection()
   await Promise.all([loadProfiles(), loadGroups()])
-  if (result?.created) ElMessage.success(`${result.created} profil diimpor dari CSV`)
+  const problems = (result?.errors || []).length
+  if (problems) {
+    ElMessage.warning(
+      `Impor CSV selesai dengan ${problems} masalah: ${result.created} profil dibuat, ${result.groups_created} grup baru, ${result.proxies_created} proxy baru`
+    )
+  } else if (result?.created) {
+    ElMessage.success(`${result.created} profil diimpor dari CSV`)
+  }
 }
 
 function base64ToBlob(base64) {
