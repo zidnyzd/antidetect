@@ -66,6 +66,10 @@ export const api = {
   updateProxy: (proxy) => call('proxy-update', proxy),
   deleteProxy: (id) => call('proxy-delete', { id }),
   checkProxy: (payload = {}) => call('proxy-check', payload),
+  importProxies: (text, defaultType = 'http') =>
+    call('proxy-import', { text, default_type: defaultType }),
+  exportProxies: (includeCredentials = true) =>
+    call('proxy-export', { include_credentials: !!includeCredentials }),
 
   extensions: (params = {}) => call('extension-list', clean({ page: 1, limit: 10, ...params })),
   uploadExtension: (payload) => call('extension-upload', payload),

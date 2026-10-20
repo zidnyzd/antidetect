@@ -35,6 +35,8 @@ venv/bin/python scripts/selftest.py
 - [x] close halus: target page ditutup lewat `GET /json/close/<id>` sebelum proses
   dimatikan, sehingga cookie/session ter-flush ke disk (SIGTERM langsung tidak flush)
 - [x] proxy dengan autentikasi user/password via jembatan gost (http/https/socks5)
+- [x] impor massal proxy (lima format, laporan per baris) dan ekspor teks
+  dengan opsi menyertakan kredensial
 - [x] fingerprint: platform, system_version, cores, memory, timezone, language, brand
 - [x] selenium/chromedriver attach (kontrak `webdriver` + `debugging_address`)
 - [x] UI: daftar profil, buat/edit 4 tab, tag per profil, kelola grup,
@@ -46,6 +48,8 @@ venv/bin/python scripts/selftest.py
   kosongkan keranjang
 - [x] operasi massal (buka/tutup, ubah grup, catatan, proxy, platform),
   cek proxy dengan IP dan latensi, pilih proxy tersimpan, atur jendela
+- [x] preferensi jendela per profil: ukuran, posisi, buka DevTools, dan
+  argumen startup yang divalidasi (flag berbahaya ditolak)
 - [x] kelola extension lokal (unggah zip/crx, daftar, hapus dengan proteksi
   pemakaian) dan pemilihan extension per profil
 - [x] info engine/kernel di Pengaturan, acak seed, kolom GPU Vendor/Renderer
@@ -171,8 +175,8 @@ WantedBy=default.target
 
 Frontend di `ui/`: Vue 3 + Element Plus + Vite. Layout mengikuti ixBrowser
 2.10.18: sidebar gelap 210 px, topbar putih 50 px, kanvas terang, tabel profil
-dengan toolbar dua baris, dan dialog Buat/Edit Profil 4 tab (Akun Platform,
-Konfigurasi Proxy, Fingerprint, Preferensi). Halaman Proxy dan Pengaturan juga
+dengan toolbar dua baris, dan dialog Buat/Edit Profil 5 tab (Akun Platform,
+Konfigurasi Proxy, Fingerprint, Extension, Preferensi). Halaman Proxy dan Pengaturan juga
 aktif. Kolom Waktu menampilkan waktu dibuat dan terakhir dibuka, dengan tooltip
 untuk masing-masing nilai. Tombol di samping filter grup membuka kelola grup:
 tambah, edit nama dan urutan, cari, serta hapus. Grup Default dan grup yang
@@ -188,6 +192,14 @@ Centang beberapa profil untuk membuka/menutup, memindahkan grup, mengubah
 catatan/proxy/platform, atau menghapus sekaligus. Tombol Atur Jendela menata
 jendela profil yang terbuka. Halaman Proxy punya tombol Tes yang menampilkan IP
 keluar dan latensi; dialog profil bisa mengisi konfigurasi dari proxy tersimpan.
+Impor Massal menerima lima format (komentar dan baris kosong diabaikan) dan
+menampilkan jumlah dibuat, duplikat dilewati, serta error per baris. Ekspor
+menghasilkan file teks, dengan pilihan menyertakan kredensial.
+
+Tab Preferensi menyimpan ukuran dan posisi jendela, switch buka DevTools, dan
+argumen startup Chromium. Argumen dipisah spasi; flag yang bisa merusak isolasi
+seperti `--user-data-dir`, `--proxy-server`, dan `--remote-debugging-port`
+ditolak saat disimpan.
 
 Halaman Extension menyimpan extension lokal dari unggahan zip/crx, menampilkan
 versi dan ukurannya, serta menolak hapus selama masih dipakai profil. Tab

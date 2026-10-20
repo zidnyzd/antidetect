@@ -3,6 +3,7 @@ import json
 import mmap
 import os
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -146,6 +147,135 @@ def kernel_for(profile):
 
 class LaunchError(Exception):
     pass
+
+
+class PreferenceError(Exception):
+    pass
+
+
+BLOCKED_STARTUP_FLAGS = (
+    "--user-data-dir",
+    "--remote-debugging-port",
+    "--remote-debugging-address",
+    "--proxy-server",
+    "--fingerprint",
+    "--load-extension",
+)
+WINDOW_SIZE_MIN = 200
+WINDOW_SIZE_MAX = 5000
+WINDOW_POSITION_MIN = -10000
+WINDOW_POSITION_MAX = 10000
+
+
+def parse_startup_args(text):
+    """Split free-form startup arguments and reject switches that change
+    profile isolation or fingerprinting."""
+    if text in (None, ""):
+        return []
+    if not isinstance(text, str):
+        raise PreferenceError("argumen startup harus berupa teks")
+    try:
+        args = shlex.split(text)
+    except ValueError:
+        raise PreferenceError("tanda kutip pada argumen startup tidak seimbang")
+    for arg in args:
+        name = arg.split("=", 1)[0] if arg.startswith("--") else arg
+        if (
+            name in BLOCKED_STARTUP_FLAGS
+            or name.startswith("--fingerprint")
+            or name.startswith("--remote-debugging-")
+            or name.startswith("--load-extension")
+        ):
+            raise PreferenceError(f"argumen startup memuat flag terlarang: {name}")
+        if any(character in arg for character in ("\x00", "\n", "\r")):
+            raise PreferenceError("argumen startup memuat karakter terlarang")
+    return args
+
+
+def _preference_number(preferences, key):
+    value = preferences.get(key)
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        raise PreferenceError(f"{key} harus berupa bilangan bulat")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise PreferenceError(f"{key} harus berupa bilangan bulat")
+    if not number.is_integer():
+        raise PreferenceError(f"{key} harus berupa bilangan bulat")
+    return int(number)
+
+
+def validate_preferences(preferences):
+    if preferences in (None, ""):
+        return
+    if not isinstance(preferences, dict):
+        raise PreferenceError("preference_config harus berupa objek")
+    for key in ("window_width", "window_height"):
+        number = _preference_number(preferences, key)
+        if number is not None and not WINDOW_SIZE_MIN <= number <= WINDOW_SIZE_MAX:
+            raise PreferenceError(
+                f"{key} harus {WINDOW_SIZE_MIN} sampai {WINDOW_SIZE_MAX}"
+            )
+    for key in ("window_x", "window_y"):
+        number = _preference_number(preferences, key)
+        if number is not None and not WINDOW_POSITION_MIN <= number <= WINDOW_POSITION_MAX:
+            raise PreferenceError(
+                f"{key} harus {WINDOW_POSITION_MIN} sampai {WINDOW_POSITION_MAX}"
+            )
+    if "startup_args" in preferences:
+        raw = preferences.get("startup_args")
+        if raw not in (None, "") and not isinstance(raw, str):
+            raise PreferenceError("argumen startup harus berupa teks")
+        parse_startup_args(raw)
+
+
+def _int_preference(value):
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else None
+
+
+def _flag_enabled(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return value is True or value == 1
+
+
+def _preference_args(preferences):
+    args = []
+    if not isinstance(preferences, dict):
+        return args
+    width = _int_preference(preferences.get("window_width"))
+    height = _int_preference(preferences.get("window_height"))
+    if (
+        width is not None
+        and height is not None
+        and WINDOW_SIZE_MIN <= width <= WINDOW_SIZE_MAX
+        and WINDOW_SIZE_MIN <= height <= WINDOW_SIZE_MAX
+    ):
+        args.append(f"--window-size={width},{height}")
+    x = _int_preference(preferences.get("window_x"))
+    y = _int_preference(preferences.get("window_y"))
+    if (
+        x is not None
+        and y is not None
+        and WINDOW_POSITION_MIN <= x <= WINDOW_POSITION_MAX
+        and WINDOW_POSITION_MIN <= y <= WINDOW_POSITION_MAX
+    ):
+        args.append(f"--window-position={x},{y}")
+    try:
+        args.extend(parse_startup_args(preferences.get("startup_args")))
+    except PreferenceError:
+        pass
+    if _flag_enabled(preferences.get("open_devtools")):
+        args.append("--auto-open-devtools-for-tabs")
+    return args
 
 
 def rand_seed():
@@ -311,7 +441,10 @@ def build_args(profile, port, app_args=None, proxy_arg=None):
 
     args.extend(_gpu_args(fp, binary))
 
-    extension_ids = (profile.get("preference_config") or {}).get("extension_ids")
+    preferences = profile.get("preference_config") or {}
+    args.extend(_preference_args(preferences))
+
+    extension_ids = preferences.get("extension_ids")
     if extension_ids and not os.environ.get("ANTIDETECT_NO_EXTENSIONS"):
         paths = extensions.extension_paths(extension_ids)
         if paths:

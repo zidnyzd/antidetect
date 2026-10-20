@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Edit, Plus, Refresh } from '@element-plus/icons-vue'
+import { Delete, Download, Edit, Plus, Refresh, Upload } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
 
@@ -17,6 +17,15 @@ const editing = ref(null)
 const busy = ref(false)
 const errors = reactive({ proxy_ip: '', proxy_port: '' })
 
+const importVisible = ref(false)
+const importBusy = ref(false)
+const importType = ref('http')
+const importText = ref('')
+const importResult = ref(null)
+const exportVisible = ref(false)
+const exportBusy = ref(false)
+const exportCredentials = ref(true)
+
 const form = reactive({
   proxy_type: 'http',
   proxy_ip: '',
@@ -28,6 +37,15 @@ const form = reactive({
 
 const isEdit = computed(() => !!editing.value)
 const title = computed(() => (isEdit.value ? 'Edit Proxy' : 'Tambah Proxy'))
+const importLines = computed(
+  () =>
+    importText.value
+      .split(/\r?\n/)
+      .filter((line) => line.trim() && !line.trim().startsWith('#')).length
+)
+const importErrors = computed(() => importResult.value?.errors || [])
+const importErrorPreview = computed(() => importErrors.value.slice(0, 10))
+const importSkipped = computed(() => importResult.value?.skipped_lines || [])
 const checks = reactive({})
 const dialogCheck = reactive({ loading: false, ok: null, text: '' })
 
@@ -163,6 +181,80 @@ async function submit() {
   }
 }
 
+function openImport() {
+  importType.value = 'http'
+  importText.value = ''
+  importResult.value = null
+  importVisible.value = true
+}
+
+async function runImport() {
+  if (!importLines.value || importBusy.value) return
+  importBusy.value = true
+  try {
+    const result = await api.importProxies(importText.value, importType.value)
+    importResult.value = result
+    const problems = importErrors.value.length
+    if (problems) {
+      ElMessage.warning(
+        `Impor selesai dengan ${problems} masalah: ${result.created} dibuat, ${result.skipped} duplikat dilewati, ${problems} gagal`
+      )
+    } else if (result.skipped) {
+      ElMessage.success(
+        `Impor selesai: ${result.created} dibuat, ${result.skipped} duplikat dilewati`
+      )
+    } else {
+      ElMessage.success(`Impor selesai: ${result.created} proxy dibuat`)
+    }
+    if (result.created) {
+      page.value = 1
+      await load()
+    }
+  } catch (error) {
+    ElMessage.error(`Gagal mengimpor proxy: ${error.message}`)
+  } finally {
+    importBusy.value = false
+  }
+}
+
+function openExport() {
+  exportCredentials.value = true
+  exportVisible.value = true
+}
+
+function downloadText(filename, contentBase64) {
+  const binary = atob(contentBase64 || '')
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  const blob = new Blob([bytes], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename || 'proxy-export.txt'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function runExport() {
+  exportBusy.value = true
+  try {
+    const result = await api.exportProxies(exportCredentials.value)
+    if (!result.count) {
+      ElMessage.info('Belum ada proxy untuk diekspor')
+      return
+    }
+    downloadText(result.filename, result.content_base64)
+    ElMessage.success(`${result.count} proxy diekspor`)
+    exportVisible.value = false
+  } catch (error) {
+    ElMessage.error(`Gagal mengekspor proxy: ${error.message}`)
+  } finally {
+    exportBusy.value = false
+  }
+}
+
 async function remove(row) {
   try {
     await ElMessageBox.confirm(`Hapus proxy ${hostLabel(row)}?`, 'Hapus Proxy', {
@@ -217,6 +309,8 @@ useOnRefresh(() => load())
       <div class="page-toolbar">
         <div class="toolbar-left">
           <el-button type="primary" :icon="Plus" @click="openCreate">Tambah Proxy</el-button>
+          <el-button :icon="Upload" @click="openImport">Impor Massal</el-button>
+          <el-button :icon="Download" @click="openExport">Ekspor</el-button>
         </div>
         <div class="toolbar-right">
           <el-tooltip content="Muat ulang daftar" placement="top" :show-after="200">
@@ -360,6 +454,104 @@ useOnRefresh(() => load())
           <el-button @click="dialogVisible = false">Batal</el-button>
           <div class="footer-spacer"></div>
           <el-button type="primary" :loading="busy" @click="submit">Simpan</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="importVisible"
+      title="Impor Massal Proxy"
+      width="640px"
+      top="8vh"
+      class="proxy-import-dialog"
+      :close-on-click-modal="false"
+    >
+      <el-form label-width="120px" label-position="right" class="dialog-form" @submit.prevent>
+        <el-form-item label="Tipe Default">
+          <el-select v-model="importType" class="field-180">
+            <el-option v-for="type in PROXY_TYPES" :key="type" :label="type.toUpperCase()" :value="type" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Daftar Proxy">
+          <el-input
+            v-model="importText"
+            type="textarea"
+            :rows="9"
+            class="import-textarea"
+            placeholder="http://user:pass@203.0.113.10:8080&#10;socks5://198.51.100.7:1080&#10;203.0.113.20:3128&#10;203.0.113.21:3128:user:pass&#10;user:pass@203.0.113.22:8000"
+          />
+          <div class="import-meta">
+            <span :class="{ 'is-over': importLines > 500 }">{{ importLines }} baris siap diimpor</span>
+            <span class="form-hint">Maksimal 500 baris. Baris kosong dan berawalan # diabaikan.</span>
+          </div>
+        </el-form-item>
+      </el-form>
+
+      <div v-if="importResult" class="import-result">
+        <div class="import-summary">
+          <span><strong>{{ importResult.created }}</strong> dibuat</span>
+          <span><strong>{{ importResult.skipped }}</strong> dilewati</span>
+          <span><strong>{{ importErrors.length }}</strong> error</span>
+        </div>
+        <div v-if="importErrors.length" class="import-errors">
+          <div class="import-errors-title">Baris yang gagal</div>
+          <ul>
+            <li v-for="item in importErrorPreview" :key="item.line">
+              <span class="mono">baris {{ item.line }}</span>
+              <span>{{ item.message }}</span>
+            </li>
+          </ul>
+          <p v-if="importErrors.length > 10" class="form-hint">
+            {{ importErrors.length - 10 }} error lain tidak ditampilkan.
+          </p>
+        </div>
+        <div v-if="importSkipped.length" class="import-errors import-skipped">
+          <div class="import-errors-title">Duplikat, dilewati</div>
+          <ul>
+            <li v-for="item in importSkipped.slice(0, 10)" :key="item.line">
+              <span class="mono">baris {{ item.line }}</span>
+              <span>{{ item.message }}</span>
+            </li>
+          </ul>
+          <p v-if="importSkipped.length > 10" class="form-hint">
+            {{ importSkipped.length - 10 }} duplikat lain tidak ditampilkan.
+          </p>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="importVisible = false">{{ importResult ? 'Tutup' : 'Batal' }}</el-button>
+          <div class="footer-spacer"></div>
+          <el-button
+            v-if="!importResult"
+            type="primary"
+            :loading="importBusy"
+            :disabled="!importLines || importLines > 500"
+            @click="runImport"
+          >
+            Impor
+          </el-button>
+          <el-button v-else type="primary" @click="importVisible = false">Selesai</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="exportVisible"
+      title="Ekspor Proxy"
+      width="440px"
+      class="proxy-export-dialog"
+      :close-on-click-modal="false"
+    >
+      <el-checkbox v-model="exportCredentials">Sertakan kredensial</el-checkbox>
+      <p class="form-hint">File teks berisi satu proxy per baris. Catatan tidak disertakan.</p>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="exportVisible = false">Batal</el-button>
+          <div class="footer-spacer"></div>
+          <el-button type="primary" :loading="exportBusy" @click="runExport">Unduh</el-button>
         </div>
       </template>
     </el-dialog>

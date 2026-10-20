@@ -151,6 +151,12 @@ function emptyForm() {
     timezone: 'Asia/Jakarta',
     language: 'id-ID',
     extension_ids: [],
+    window_width: null,
+    window_height: null,
+    window_x: null,
+    window_y: null,
+    open_devtools: false,
+    startup_args: '',
   }
 }
 
@@ -278,6 +284,20 @@ function fillFromProfile(profile) {
     ? extensionIds.map((id) => Number(id)).filter((id) => Number.isInteger(id))
     : []
   kernelPath.value = String(preference.kernel_path || '')
+  form.window_width = numericPreference(preference.window_width)
+  form.window_height = numericPreference(preference.window_height)
+  form.window_x = numericPreference(preference.window_x)
+  form.window_y = numericPreference(preference.window_y)
+  const devtools = preference.open_devtools
+  form.open_devtools =
+    devtools === true || devtools === 1 || ['1', 'true'].includes(String(devtools).toLowerCase())
+  form.startup_args = typeof preference.startup_args === 'string' ? preference.startup_args : ''
+}
+
+function numericPreference(value) {
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
 }
 
 function kernelLabel(kernel) {
@@ -442,6 +462,16 @@ function preferencePayload() {
   const builtin = builtinKernelPath.value
   if (kernelPath.value && kernelPath.value !== builtin) payload.kernel_path = kernelPath.value
   else delete payload.kernel_path
+
+  for (const key of ['window_width', 'window_height', 'window_x', 'window_y']) {
+    const value = form[key]
+    if (value === null || value === undefined || value === '') delete payload[key]
+    else payload[key] = Number(value)
+  }
+  payload.open_devtools = !!form.open_devtools
+  const startupArgs = form.startup_args.trim()
+  if (startupArgs) payload.startup_args = startupArgs
+  else delete payload.startup_args
   return payload
 }
 
@@ -907,6 +937,71 @@ async function testProxy() {
           <p v-if="kernelSavedMissing" class="form-hint is-warn">
             Kernel tersimpan tidak tersedia lagi, profil memakai engine bawaan.
           </p>
+          <el-form-item label="Ukuran Jendela">
+            <div class="pair-inputs">
+              <el-input-number
+                v-model="form.window_width"
+                :min="200"
+                :max="5000"
+                :step="10"
+                :controls="false"
+                class="field-140"
+                placeholder="1280"
+              />
+              <span class="pair-separator">x</span>
+              <el-input-number
+                v-model="form.window_height"
+                :min="200"
+                :max="5000"
+                :step="10"
+                :controls="false"
+                class="field-140"
+                placeholder="800"
+              />
+              <span class="form-hint">piksel, kosong = default engine</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="Posisi Jendela">
+            <div class="pair-inputs">
+              <el-input-number
+                v-model="form.window_x"
+                :min="-10000"
+                :max="10000"
+                :controls="false"
+                class="field-140"
+                placeholder="X"
+              />
+              <span class="pair-separator">,</span>
+              <el-input-number
+                v-model="form.window_y"
+                :min="-10000"
+                :max="10000"
+                :controls="false"
+                class="field-140"
+                placeholder="Y"
+              />
+              <span class="form-hint">kosong = default engine</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="DevTools">
+            <div class="switch-cell">
+              <el-switch v-model="form.open_devtools" />
+              <span class="switch-label">Buka DevTools saat profil dibuka</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="Argumen Startup">
+            <div class="startup-args">
+              <el-input
+                v-model="form.startup_args"
+                type="textarea"
+                :rows="2"
+                placeholder="--disable-gpu --lang=id"
+              />
+              <p class="form-hint">
+                Dipisah spasi. Flag berbahaya seperti --user-data-dir dan --proxy-server ditolak.
+              </p>
+            </div>
+          </el-form-item>
           <el-form-item label="Warna Profil">
             <div class="color-swatches">
               <button

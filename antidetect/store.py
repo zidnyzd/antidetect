@@ -286,6 +286,24 @@ def latest_seed(conn, profile_id):
     return row["seed"] if row else None
 
 
+def create_proxy(conn, data):
+    cur = conn.execute(
+        """INSERT INTO proxies (proxy_type, proxy_ip, proxy_port, proxy_user,
+           proxy_password, note, tag) VALUES (?,?,?,?,?,?,?)""",
+        (
+            data.get("proxy_type"),
+            data.get("proxy_ip"),
+            data.get("proxy_port"),
+            data.get("proxy_user"),
+            data.get("proxy_password"),
+            data.get("note"),
+            data.get("tag"),
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
 EVENT_LIMIT = 2000
 EVENT_GROUPS = ("profile", "proxy", "extension", "group", "tag")
 

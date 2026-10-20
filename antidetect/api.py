@@ -15,6 +15,7 @@ from . import (
     passwords,
     profileio,
     proxycheck,
+    proxytext,
     store,
 )
 
@@ -108,6 +109,13 @@ def _check_kernel_path(data):
         raise ApiError(1000, "kernel tidak tersedia")
 
 
+def _check_preferences(data):
+    try:
+        launcher.validate_preferences(data.get("preference_config"))
+    except launcher.PreferenceError as error:
+        raise ApiError(1000, str(error))
+
+
 @action("profile-reset-seed")
 def profile_reset_seed(params):
     pid = _pid(params)
@@ -143,6 +151,7 @@ def profile_list(params):
 @action("profile-create")
 def profile_create(params):
     _check_kernel_path(params)
+    _check_preferences(params)
     with store.db() as conn:
         pid = store.create_profile(conn, params)
         name = _profile_name(conn, pid)
@@ -154,6 +163,7 @@ def profile_create(params):
 def profile_update(params):
     pid = _pid(params)
     _check_kernel_path(params)
+    _check_preferences(params)
     with store.db() as conn:
         _active_profile(conn, pid)
         store.update_profile(conn, pid, params)
@@ -749,24 +759,30 @@ def proxy_list(params):
         return _paginated(conn, "proxies", params.get("page") or 1, params.get("limit") or 10)
 
 
+@action("proxy-import")
+def proxy_import(params):
+    try:
+        result = proxytext.import_text(params.get("text"), params.get("default_type"))
+    except proxytext.ProxyTextError as error:
+        raise ApiError(1000, str(error))
+    _event(
+        "proxy-import",
+        f"Impor proxy: {result['created']} dibuat, {result['skipped']} dilewati",
+    )
+    return result
+
+
+@action("proxy-export")
+def proxy_export(params):
+    result = proxytext.export_proxies(params.get("include_credentials", False))
+    _event("proxy-export", f"Ekspor {result['count']} proxy")
+    return result
+
+
 @action("proxy-create")
 def proxy_create(params):
     with store.db() as conn:
-        cur = conn.execute(
-            """INSERT INTO proxies (proxy_type, proxy_ip, proxy_port, proxy_user,
-               proxy_password, note, tag) VALUES (?,?,?,?,?,?,?)""",
-            (
-                params.get("proxy_type"),
-                params.get("proxy_ip"),
-                params.get("proxy_port"),
-                params.get("proxy_user"),
-                params.get("proxy_password"),
-                params.get("note"),
-                params.get("tag"),
-            ),
-        )
-        conn.commit()
-        proxy_id = cur.lastrowid
+        proxy_id = store.create_proxy(conn, params)
     _event("proxy-create", f'Proxy "{_event_name(_proxy_label(params))}" ditambahkan')
     return {"id": proxy_id}
 
