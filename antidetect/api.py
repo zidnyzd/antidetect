@@ -1,9 +1,11 @@
 """ixBrowser-compatible local API server (subset), stdlib only."""
 import base64
 import json
+import os
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import (
     bookmarks,
@@ -234,14 +236,21 @@ def profile_export(params):
     pid = _known_pid(params)
     try:
         bundle = profileio.export_profile(pid)
+        name = bundle["profile"].get("name") or pid
+        password = str(params.get("password") or "")
+        if password:
+            bundle = profileio.encrypt_bundle(bundle, password)
     except profileio.ProfileIOError as error:
         raise ApiError(1004, str(error))
     content = json.dumps(bundle, ensure_ascii=False, indent=2).encode()
-    name = bundle["profile"].get("name") or pid
     _event("profile-export", f'Profil "{_event_name(name)}" diekspor', pid)
+    filename = profileio.export_filename(name)
+    if password:
+        filename = filename[:-5] + ".enc.json"
     return {
-        "filename": profileio.export_filename(bundle["profile"].get("name")),
+        "filename": filename,
         "content_base64": base64.b64encode(content).decode("ascii"),
+        "encrypted": bool(password),
     }
 
 
@@ -255,6 +264,11 @@ def profile_import(params):
             bundle = params.get("json")
         else:
             raise profileio.ProfileIOError("isi file profil kosong")
+        if profileio.is_encrypted(bundle):
+            password = str(params.get("password") or "")
+            if not password:
+                raise profileio.ProfileIOError("file profil terenkripsi, kata sandi wajib diisi")
+            bundle = profileio.decrypt_bundle(bundle, password)
         created = profileio.import_profile(bundle)
     except profileio.ProfileIOError as error:
         raise ApiError(1000, str(error))
@@ -926,18 +940,42 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self._send_cors_headers()
         self.end_headers()
+
+    def _origin_allowed(self):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return None
+        extra = {
+            item.strip().rstrip("/")
+            for item in os.environ.get("ANTIDETECT_ALLOWED_ORIGINS", "").split(",")
+            if item.strip()
+        }
+        if origin.rstrip("/") in extra:
+            return origin
+        try:
+            parts = urlsplit(origin)
+        except ValueError:
+            return None
+        if parts.scheme in ("http", "https") and parts.hostname in ("127.0.0.1", "localhost", "::1"):
+            return origin
+        return None
+
+    def _send_cors_headers(self):
+        origin = self._origin_allowed()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
 
     def _json(self, code, payload):
         body = json.dumps(payload).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self._send_cors_headers()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

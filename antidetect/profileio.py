@@ -1,11 +1,13 @@
 """Export and import profile bundles as portable JSON."""
 import base64
 import json
+import subprocess
 import time
 
 from . import cookies, launcher, store
 
 VERSION = 1
+ENCRYPTED_FORMAT = "antidetect-profile-encrypted"
 
 
 class ProfileIOError(Exception):
@@ -47,6 +49,70 @@ def export_profile(profile_id):
         "profile": profile,
         "cookies": cookie_list,
     }
+
+
+def _openssl(data, password, decrypt=False):
+    command = [
+        "openssl",
+        "enc",
+        "-aes-256-cbc",
+        "-pbkdf2",
+        "-salt",
+        "-md",
+        "sha256",
+        "-pass",
+        "stdin",
+    ]
+    if decrypt:
+        command.insert(2, "-d")
+    try:
+        result = subprocess.run(
+            command,
+            input=str(password).encode() + b"\n" + data,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ProfileIOError(f"openssl tidak tersedia: {error}")
+    if result.returncode != 0:
+        raise ProfileIOError("kata sandi salah atau file rusak")
+    return result.stdout
+
+
+def encrypt_bundle(bundle, password):
+    password = str(password or "")
+    if len(password) < 8:
+        raise ProfileIOError("kata sandi minimal 8 karakter")
+    raw = json.dumps(bundle, ensure_ascii=False).encode()
+    cipher = _openssl(raw, password)
+    return {
+        "format": ENCRYPTED_FORMAT,
+        "version": VERSION,
+        "data": base64.b64encode(cipher).decode("ascii"),
+    }
+
+
+def decrypt_bundle(envelope, password):
+    if not isinstance(envelope, dict) or envelope.get("format") != ENCRYPTED_FORMAT:
+        raise ProfileIOError("file bukan bundle terenkripsi")
+    try:
+        cipher = base64.b64decode(str(envelope.get("data") or ""), validate=False)
+    except (TypeError, ValueError):
+        raise ProfileIOError("data terenkripsi tidak valid")
+    if not cipher:
+        raise ProfileIOError("data terenkripsi kosong")
+    raw = _openssl(cipher, str(password or ""), decrypt=True)
+    try:
+        bundle = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ProfileIOError("hasil dekripsi bukan JSON yang valid")
+    if not isinstance(bundle, dict):
+        raise ProfileIOError("bundle hasil dekripsi tidak valid")
+    return bundle
+
+
+def is_encrypted(value):
+    return isinstance(value, dict) and value.get("format") == ENCRYPTED_FORMAT
 
 
 def decode_content(content):

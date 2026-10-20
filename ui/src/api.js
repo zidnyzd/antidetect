@@ -42,8 +42,10 @@ export const api = {
   arrangeTile: (payload = {}) => call('profile-opened-list-arrange-tile', payload),
   getCookies: (profileId) => call('profile-get-cookies', { profile_id: profileId }),
   updateCookies: (profileId, cookie) => call('profile-update-cookies', { profile_id: profileId, cookie }),
-  exportProfile: (profileId) => call('profile-export', { profile_id: profileId }),
-  importProfile: (content) => call('profile-import', { content_base64: content }),
+  exportProfile: (profileId, password = '') =>
+    call('profile-export', { profile_id: profileId, ...(password ? { password } : {}) }),
+  importProfile: (content, password = '') =>
+    call('profile-import', { content_base64: content, ...(password ? { password } : {}) }),
   bookmarks: (profileId) => call('profile-bookmarks', { profile_id: profileId }),
   savedPasswords: (profileId) => call('profile-saved-passwords', { profile_id: profileId }),
   clearCache: (profileId) => call('profile-clear-cache', { profile_id: profileId }),

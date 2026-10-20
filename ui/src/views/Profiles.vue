@@ -456,7 +456,29 @@ async function onImportFile(event) {
   importBusy.value = true
   try {
     const content = await readBase64(file)
-    const profile = await api.importProfile(content)
+    let profile
+    try {
+      profile = await api.importProfile(content)
+    } catch (error) {
+      if (!/terenkripsi/i.test(error.message || '')) throw error
+      let password
+      try {
+        const answer = await ElMessageBox.prompt(
+          `File "${file.name}" terenkripsi. Masukkan kata sandi untuk membukanya.`,
+          'Kata Sandi Impor',
+          {
+            inputType: 'password',
+            inputPlaceholder: 'Kata sandi file',
+            confirmButtonText: 'Impor',
+            cancelButtonText: 'Batal',
+          }
+        )
+        password = answer.value || ''
+      } catch {
+        return
+      }
+      profile = await api.importProfile(content, password)
+    }
     page.value = 1
     clearSelection()
     await Promise.all([loadProfiles(), loadGroups(), loadTags()])
@@ -477,9 +499,29 @@ function base64ToBlob(base64) {
   return new Blob([bytes], { type: 'application/json' })
 }
 
-async function exportProfile(profile) {
+async function exportProfile(profile, encrypted = false) {
+  let password = ''
+  if (encrypted) {
+    try {
+      const answer = await ElMessageBox.prompt(
+        `Ekspor profil "${profile.name}" dengan kata sandi. Kata sandi minimal 8 karakter.`,
+        'Ekspor Terenkripsi',
+        {
+          inputType: 'password',
+          inputPlaceholder: 'Kata sandi ekspor',
+          confirmButtonText: 'Ekspor',
+          cancelButtonText: 'Batal',
+          inputValidator: (value) =>
+            String(value || '').length >= 8 || 'Kata sandi minimal 8 karakter',
+        }
+      )
+      password = answer.value || ''
+    } catch {
+      return
+    }
+  }
   try {
-    const result = await api.exportProfile(profile.profile_id)
+    const result = await api.exportProfile(profile.profile_id, password)
     const url = URL.createObjectURL(base64ToBlob(result.content_base64))
     const link = document.createElement('a')
     link.href = url
@@ -488,7 +530,9 @@ async function exportProfile(profile) {
     link.click()
     link.remove()
     setTimeout(() => URL.revokeObjectURL(url), 1000)
-    ElMessage.success(`Profil "${profile.name}" diekspor`)
+    ElMessage.success(
+      result.encrypted ? `Profil "${profile.name}" diekspor terenkripsi` : `Profil "${profile.name}" diekspor`
+    )
   } catch (error) {
     ElMessage.error(`Gagal mengekspor: ${error.message}`)
   }
@@ -528,6 +572,10 @@ function onRowCommand(command, profile) {
   }
   if (command === 'export') {
     exportProfile(profile)
+    return
+  }
+  if (command === 'export-encrypted') {
+    exportProfile(profile, true)
     return
   }
   if (command === 'bookmarks') {
@@ -1141,6 +1189,7 @@ useOnRefresh(() => refreshAll())
                     <el-dropdown-item command="bookmarks" :icon="Star">Bookmark</el-dropdown-item>
                     <el-dropdown-item command="passwords" :icon="Lock">Password Tersimpan</el-dropdown-item>
                     <el-dropdown-item command="export" :icon="Download" divided>Ekspor</el-dropdown-item>
+                    <el-dropdown-item command="export-encrypted" :icon="Lock">Ekspor Terenkripsi</el-dropdown-item>
                     <el-dropdown-item command="clear-cache" :icon="Brush" divided>Bersihkan cache</el-dropdown-item>
                     <el-dropdown-item command="clear-cache-cookies" :icon="Brush">Bersihkan cache + cookie</el-dropdown-item>
                     <el-dropdown-item command="clear-cache-extensions" :icon="Brush">

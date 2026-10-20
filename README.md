@@ -51,6 +51,7 @@ venv/bin/python scripts/selftest.py
 - [x] info engine/kernel di Pengaturan, acak seed, kolom GPU Vendor/Renderer
   dan opsi tampilkan GPU host (binary 150 belum menerapkan flag GPU)
 - [x] ekspor/impor profil (JSON), penampil bookmark dan password tersimpan
+- [x] ekspor profil terenkripsi kata sandi (AES-256, minimal 8 karakter)
 - [x] filter tag, pilih kolom tersimpan, preset platform akun
 - [x] halaman Dasbor dan halaman API dengan contoh curl dan Selenium
 - [x] log operasi lokal dengan filter jenis, pencarian, dan bersihkan log
@@ -113,12 +114,27 @@ proxy auth tanpa keluar lewat proxy internet: `scripts/test-auth-proxy.py`
   `--disable-gpu-fingerprint` tidak ada di binary 150. Nilai GPU Vendor/Renderer
   tetap disimpan dan UI memberi peringatan, tetapi belum diterapkan engine.
   Opsi tampilkan GPU host memakai `--disable-spoofing=gpu` bila tersedia.
-- Pemilihan versi kernel belum ada; `engine-info` hanya melaporkan kernel yang
-  terpasang dan launcher selalu memakai engine bawaan.
+- Belum ada pengelola unduhan/update kernel; kernel tambahan harus diletakkan
+  manual di `~/.local/share/antidetect/kernels/<nama>/chrome`, lalu dipilih
+  per profil lewat tab Preferensi.
 - Belum dipetakan dan tidak diklaim: `fonts`, `webrtc`, `canvas`, `audio_context`,
   `webgl_*`, `javascript_memory_type`, dan atribut SDK lain di luar tabel.
 - `resolving_power_type`, `language_type`, `timezone_type`, `location*` (tidak
   berpengaruh pada launcher; nilai mentah tetap disimpan di profil).
+
+## Keamanan lokal
+
+API hanya mendengarkan di `127.0.0.1:53200`. CORS membatasi browser ke origin
+localhost/127.0.0.1; origin lain tidak mendapat header CORS sehingga halaman
+web eksternal tidak bisa memanggil API. Tambahan origin tepercaya bisa diisi
+lewat `ANTIDETECT_ALLOWED_ORIGINS` (dipisah koma). API tetap tanpa token agar
+kompatibel dengan SDK ixBrowser; proses lokal yang sudah berjalan di mesin ini
+dianggap tepercaya.
+
+Ekspor profil bisa diberi kata sandi. Isinya dienkripsi AES-256-CBC dengan
+PBKDF2-SHA256 lewat `openssl`, dan impor meminta kata sandi yang sama. Ekspor
+tanpa kata sandi tetap JSON biasa yang memuat cookie dan kredensial proxy,
+jadi simpan file itu di tempat aman.
 
 ## Catatan
 
@@ -178,9 +194,10 @@ versi dan ukurannya, serta menolak hapus selama masih dipakai profil. Tab
 Extension di dialog profil memilih extension yang dimuat saat profil dibuka.
 
 Profil bisa diekspor ke JSON dan diimpor kembali (nama diberi akhiran
-"(impor)", seed baru, cookie ikut). Menu baris juga menyediakan penampil
-Bookmark dan Password Tersimpan; password didekripsi lokal dan hanya
-ditampilkan saat tombol mata ditekan.
+"(impor)", seed baru, cookie ikut). Menu baris punya Ekspor Terenkripsi yang
+meminta kata sandi; impor file terenkripsi akan meminta kata sandi yang sama.
+Menu baris juga menyediakan penampil Bookmark dan Password Tersimpan; password
+didekripsi lokal dan hanya ditampilkan saat tombol mata ditekan.
 
 Dasbor jadi halaman pertama berisi ringkasan profil, grup, extension, proxy,
 dan profil terbaru. Halaman API menampilkan base URL lokal, status health,
@@ -212,7 +229,8 @@ ke keranjang, buka/tutup profil dengan timestamp terakhir dibuka, tag per
 profil, kelola grup, filter status dan grup, pencarian, pagination, cookie
 import/export, aksi cache, pemulihan keranjang sampah, operasi massal, cek
 proxy, pilih proxy tersimpan, atur jendela, filter tag, pilih kolom,
-ekspor/impor profil, bookmark, password tersimpan, preset platform, dasbor,
+ekspor/impor profil (termasuk terenkripsi), bookmark, password tersimpan,
+preset platform, dasbor,
 halaman API, log operasi, pilih kernel per profil, serta CRUD proxy. Shell
 desktop (Tauri/Electron) menyusul.
 
