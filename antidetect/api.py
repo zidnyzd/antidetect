@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from . import (
     bookmarks,
     cookies,
+    csvimport,
     extensions,
     launcher,
     passwords,
@@ -90,6 +91,7 @@ def engine_info(params):
         "path": str(launcher.ENGINE_DIR),
         "version": kernels[0]["version"],
         "kernels": kernels,
+        "disable_spoofing_values": list(launcher.DISABLE_SPOOFING_VALUES),
     }
 
 
@@ -113,6 +115,16 @@ def _check_kernel_path(data):
 def _check_preferences(data):
     try:
         launcher.validate_preferences(data.get("preference_config"))
+    except launcher.PreferenceError as error:
+        raise ApiError(1000, str(error))
+
+
+def _check_fingerprint(data):
+    config = data.get("fingerprint_config")
+    if not isinstance(config, dict):
+        return
+    try:
+        launcher.parse_disable_spoofing(config.get("disable_spoofing"))
     except launcher.PreferenceError as error:
         raise ApiError(1000, str(error))
 
@@ -229,6 +241,7 @@ def profile_logs(params):
 def profile_create(params):
     _check_kernel_path(params)
     _check_preferences(params)
+    _check_fingerprint(params)
     with store.db() as conn:
         pid = store.create_profile(conn, params)
         name = _profile_name(conn, pid)
@@ -241,6 +254,7 @@ def profile_update(params):
     pid = _pid(params)
     _check_kernel_path(params)
     _check_preferences(params)
+    _check_fingerprint(params)
     with store.db() as conn:
         _active_profile(conn, pid)
         store.update_profile(conn, pid, params)
@@ -365,6 +379,19 @@ def profile_import(params):
         created.get("profile_id"),
     )
     return created
+
+
+@action("profile-import-csv")
+def profile_import_csv(params):
+    try:
+        result = csvimport.import_csv(params.get("text"))
+    except csvimport.CsvImportError as error:
+        raise ApiError(1000, str(error))
+    _event(
+        "profile-import-csv",
+        f"{result['created']} profil diimpor dari CSV",
+    )
+    return result
 
 
 @action("profile-open")
@@ -556,6 +583,7 @@ def profile_batch_update(params):
             data[key] = value
     if not data:
         raise ApiError(1000, f"Tidak ada field untuk diubah, pilih salah satu dari {', '.join(BATCH_FIELDS)}")
+    _check_fingerprint(data)
     with store.db() as conn:
         for pid in ids:
             _active_profile(conn, pid)
