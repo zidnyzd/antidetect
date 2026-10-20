@@ -62,6 +62,7 @@ export const api = {
   clearCacheKeepExtensions: (profileId) => call('profile-clear-cache-keep-extensions', { profile_id: profileId }),
   clearSavedPassword: (profileId) => call('profile-clear-saved-user-password', { profile_id: profileId }),
   resetSeed: (profileId) => call('profile-reset-seed', { profile_id: profileId }),
+  profileLogs: (profileId, kind = 'chrome') => call('profile-logs', { profile_id: profileId, kind }),
   engineInfo: () => call('engine-info'),
   groups: () => call('group-list', { page: 1, limit: 100 }),
   createGroup: (group) => call('group-create', group),
@@ -85,6 +86,7 @@ export const api = {
   deleteExtension: (id) => call('extension-delete', { id }),
 
   events: (params = {}) => call('event-list', clean({ page: 1, limit: 20, ...params })),
+  exportEvents: (params = {}) => call('event-export', clean(params)),
   clearEvents: () => call('event-clear'),
 
   health: async () => {

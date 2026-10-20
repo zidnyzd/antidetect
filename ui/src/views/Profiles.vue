@@ -1,13 +1,14 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Brush, CopyDocument, Delete, Download, Edit, Files, FolderOpened, Grid, Key, Lock, Menu, MoreFilled, Plus, Refresh, Search, Star, Upload } from '@element-plus/icons-vue'
+import { ArrowDown, Brush, Connection, CopyDocument, Delete, Document, Download, Edit, Files, FolderOpened, Grid, Key, Lock, Menu, MoreFilled, Plus, Refresh, Search, Star, Upload } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
 import ProfileDialog from '../components/ProfileDialog.vue'
 import CookieDialog from '../components/CookieDialog.vue'
 import BookmarkDialog from '../components/BookmarkDialog.vue'
 import PasswordDialog from '../components/PasswordDialog.vue'
+import ProfileLogDialog from '../components/ProfileLogDialog.vue'
 import GroupManager from '../components/GroupManager.vue'
 
 const POOL_LIMIT = 1000
@@ -57,6 +58,8 @@ const search = ref('')
 const groupFilter = ref('all')
 const tagFilter = ref('all')
 const statusFilter = ref('all')
+const sortBy = ref('created')
+const sortDir = ref('desc')
 const busy = ref({})
 const bulkBusy = ref(false)
 const tableRef = ref(null)
@@ -70,6 +73,10 @@ const bookmarkVisible = ref(false)
 const bookmarkProfile = ref(null)
 const passwordVisible = ref(false)
 const passwordProfile = ref(null)
+const logVisible = ref(false)
+const logProfile = ref(null)
+const logKind = ref('chrome')
+const gostLogs = ref({})
 const importInput = ref(null)
 const importBusy = ref(false)
 const bulkKind = ref('')
@@ -175,6 +182,8 @@ async function loadProfiles() {
       name: search.value.trim() || undefined,
       group_id: groupFilter.value === 'all' ? undefined : groupFilter.value,
       tab_id: tagFilter.value === 'all' ? undefined : tagFilter.value,
+      sort_by: sortBy.value,
+      sort_dir: sortDir.value,
     })
     if (all) {
       rows.value = result.data || []
@@ -254,6 +263,40 @@ function showAllColumns() {
 function onPageChange(value) {
   page.value = value
   if (statusFilter.value === 'all') loadProfiles()
+}
+
+const SORT_FIELDS = { name: 'name', group: 'group', last_open: 'last_open' }
+
+function onSortChange({ prop, order }) {
+  if (!order || !SORT_FIELDS[prop]) {
+    sortBy.value = 'created'
+    sortDir.value = 'desc'
+  } else {
+    sortBy.value = SORT_FIELDS[prop]
+    sortDir.value = order === 'ascending' ? 'asc' : 'desc'
+  }
+  page.value = 1
+  clearSelection()
+  loadProfiles()
+}
+
+async function checkGostLog(profile) {
+  try {
+    const result = await api.profileLogs(profile.profile_id, 'gost')
+    gostLogs.value = { ...gostLogs.value, [profile.profile_id]: !!result.exists }
+  } catch {
+    gostLogs.value = { ...gostLogs.value, [profile.profile_id]: false }
+  }
+}
+
+function onLogMenuVisible(visible, profile) {
+  if (visible) checkGostLog(profile)
+}
+
+function openLog(profile, kind) {
+  logProfile.value = profile
+  logKind.value = kind
+  logVisible.value = true
 }
 
 function onSizeChange(value) {
@@ -584,6 +627,14 @@ function onRowCommand(command, profile) {
   }
   if (command === 'passwords') {
     openPasswords(profile)
+    return
+  }
+  if (command === 'log-chrome') {
+    openLog(profile, 'chrome')
+    return
+  }
+  if (command === 'log-gost') {
+    openLog(profile, 'gost')
     return
   }
   if (DATA_ACTIONS[command]) runDataAction(profile, command)
@@ -1067,6 +1118,7 @@ useOnRefresh(() => refreshAll())
         :data="visibleRows"
         row-key="profile_id"
         @selection-change="onSelectionChange"
+        @sort-change="onSortChange"
       >
         <el-table-column type="selection" width="38" />
         <el-table-column label="No." width="54" sortable :sort-method="sortByProfileId">
@@ -1077,12 +1129,24 @@ useOnRefresh(() => refreshAll())
             >{{ row.profile_id }}</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="isColumnVisible('name')" label="Nama" min-width="150">
+        <el-table-column
+          v-if="isColumnVisible('name')"
+          label="Nama"
+          prop="name"
+          min-width="150"
+          sortable="custom"
+        >
           <template #default="{ row }">
             <button type="button" class="profile-name" :title="row.name" @click="openEdit(row)">{{ row.name }}</button>
           </template>
         </el-table-column>
-        <el-table-column v-if="isColumnVisible('group')" label="Grup" width="100">
+        <el-table-column
+          v-if="isColumnVisible('group')"
+          label="Grup"
+          prop="group"
+          width="106"
+          sortable="custom"
+        >
           <template #default="{ row }">
             <span class="cell-main" :title="groupTitle(row.group_id)">{{ groupTitle(row.group_id) }}</span>
           </template>
@@ -1133,7 +1197,13 @@ useOnRefresh(() => refreshAll())
             <span v-else class="time-line is-empty">-</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="isColumnVisible('last_open')" label="Terakhir Dibuka" width="124">
+        <el-table-column
+          v-if="isColumnVisible('last_open')"
+          label="Terakhir Dibuka"
+          prop="last_open"
+          width="146"
+          sortable="custom"
+        >
           <template #default="{ row }">
             <el-tooltip :content="lastOpenedTitle(row)" placement="top" :show-after="200">
               <span v-if="row.last_open_time" class="time-stack">
@@ -1181,13 +1251,21 @@ useOnRefresh(() => refreshAll())
                   @click="duplicateProfile(row)"
                 />
               </el-tooltip>
-              <el-dropdown trigger="click" @command="(command) => onRowCommand(command, row)">
+              <el-dropdown
+                trigger="click"
+                @command="(command) => onRowCommand(command, row)"
+                @visible-change="(visible) => onLogMenuVisible(visible, row)"
+              >
                 <el-button size="small" class="icon-action" :icon="MoreFilled" aria-label="Operasi lain" />
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="cookie" :icon="Files">Cookie</el-dropdown-item>
                     <el-dropdown-item command="bookmarks" :icon="Star">Bookmark</el-dropdown-item>
                     <el-dropdown-item command="passwords" :icon="Lock">Password Tersimpan</el-dropdown-item>
+                    <el-dropdown-item command="log-chrome" :icon="Document" divided>Log Chrome</el-dropdown-item>
+                    <el-dropdown-item v-if="gostLogs[row.profile_id]" command="log-gost" :icon="Connection">
+                      Log Proxy
+                    </el-dropdown-item>
                     <el-dropdown-item command="export" :icon="Download" divided>Ekspor</el-dropdown-item>
                     <el-dropdown-item command="export-encrypted" :icon="Lock">Ekspor Terenkripsi</el-dropdown-item>
                     <el-dropdown-item command="clear-cache" :icon="Brush" divided>Bersihkan cache</el-dropdown-item>
@@ -1254,6 +1332,8 @@ useOnRefresh(() => refreshAll())
     <BookmarkDialog v-model="bookmarkVisible" :profile="bookmarkProfile" />
 
     <PasswordDialog v-model="passwordVisible" :profile="passwordProfile" />
+
+    <ProfileLogDialog v-model="logVisible" :profile="logProfile" :kind="logKind" />
 
     <el-dialog
       v-model="bulkVisible"

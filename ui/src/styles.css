@@ -977,6 +977,24 @@ button {
   color: var(--ix-muted);
 }
 
+.log-range-picker.el-date-editor--daterange {
+  width: 280px;
+}
+
+.log-range-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--ix-border);
+  border-radius: 3px;
+  background: var(--ix-primary-soft);
+  color: var(--ix-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .log-table .log-profile {
   display: block;
   font-weight: 500;
@@ -1360,6 +1378,111 @@ button {
   font-size: 12px;
   line-height: 1.65;
   tab-size: 2;
+}
+
+/* Profile logs */
+
+.profile-log-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 20px 8px;
+}
+
+.profile-log-alert {
+  margin: 0;
+}
+
+.profile-log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.profile-log-toolbar .el-button + .el-button {
+  margin-left: 0;
+}
+
+.profile-log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--ix-text-secondary);
+}
+
+.profile-log-meta strong {
+  font-weight: 600;
+  color: var(--ix-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.profile-log-truncated {
+  font-weight: 600;
+  color: var(--ix-text-secondary);
+}
+
+.profile-log-complete {
+  color: var(--ix-muted);
+}
+
+.profile-log-path {
+  margin-left: auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--ix-muted);
+}
+
+.profile-log-content {
+  margin: 0;
+  min-height: 240px;
+  max-height: 58vh;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--ix-border);
+  border-radius: var(--ix-radius);
+  background: var(--ix-bg);
+  color: var(--ix-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+
+.profile-log-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 240px;
+  padding: 24px;
+  border: 1px solid var(--ix-border);
+  border-radius: var(--ix-radius);
+  background: var(--ix-bg);
+  text-align: center;
+}
+
+.profile-log-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ix-text);
+}
+
+.profile-log-empty-text {
+  margin: 0;
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ix-muted);
 }
 
 /* Bookmark and password dialogs */

@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import shutil
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -135,17 +136,93 @@ def profile_list(params):
     page = int(params.get("page") or 1)
     limit = int(params.get("limit") or 10)
     tag_id = params.get("tab_id", params.get("tag_id"))
-    with store.db() as conn:
-        total, rows = store.list_profiles(
-            conn,
-            page=page,
-            limit=limit,
-            group_id=params.get("group_id"),
-            name=params.get("name"),
-            profile_id=params.get("profile_id"),
-            tag_id=tag_id,
-        )
-        return {"total": total, "data": [store.profile_to_dict(r) for r in rows]}
+    try:
+        with store.db() as conn:
+            total, rows = store.list_profiles(
+                conn,
+                page=page,
+                limit=limit,
+                group_id=params.get("group_id"),
+                name=params.get("name"),
+                profile_id=params.get("profile_id"),
+                tag_id=tag_id,
+                sort_by=params.get("sort_by") or "created",
+                sort_dir=params.get("sort_dir") or "desc",
+            )
+    except ValueError as error:
+        raise ApiError(1000, str(error))
+    return {"total": total, "data": [store.profile_to_dict(r) for r in rows]}
+
+
+LOG_KINDS = ("chrome", "gost")
+LOG_READ_BYTES = 1024 * 1024
+LOG_READ_LINES = 2000
+
+
+def _read_profile_log(profile_id, kind):
+    name = f"{kind}.log"
+    public_path = launcher.PROFILES_DIR / str(profile_id) / name
+    empty = {
+        "exists": False,
+        "path": str(public_path),
+        "size": 0,
+        "lines": 0,
+        "content": "",
+        "truncated": False,
+    }
+    try:
+        root = launcher.PROFILES_DIR.resolve()
+        base = (launcher.PROFILES_DIR / str(profile_id)).resolve()
+        if not base.is_relative_to(root):
+            return empty
+        target = base / name
+        if target.exists() or target.is_symlink():
+            resolved = target.resolve()
+            if not resolved.is_relative_to(base) or not resolved.is_relative_to(root):
+                return empty
+        stat = target.stat()
+    except (OSError, RuntimeError):
+        return empty
+    if not target.is_file():
+        return empty
+
+    size = stat.st_size
+    truncated = size > LOG_READ_BYTES
+    try:
+        with target.open("rb") as handle:
+            if truncated:
+                handle.seek(size - LOG_READ_BYTES)
+                data = handle.read()
+                cut = data.find(b"\n")
+                data = data[cut + 1:] if cut >= 0 else b""
+            else:
+                data = handle.read()
+    except FileNotFoundError:
+        return empty
+    except OSError as error:
+        raise ApiError(1004, f"log tidak bisa dibaca: {error}")
+
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if len(lines) > LOG_READ_LINES:
+        lines = lines[-LOG_READ_LINES:]
+        truncated = True
+    return {
+        "exists": True,
+        "path": str(public_path),
+        "size": size,
+        "lines": len(lines),
+        "content": "\n".join(lines),
+        "truncated": truncated,
+    }
+
+
+@action("profile-logs")
+def profile_logs(params):
+    kind = str(params.get("kind") or "chrome").strip().lower()
+    if kind not in LOG_KINDS:
+        raise ApiError(1000, "kind harus chrome atau gost")
+    return _read_profile_log(_known_pid(params), kind)
+
 
 
 @action("profile-create")
@@ -959,11 +1036,49 @@ def event_list(params):
     try:
         page = max(1, int(params.get("page") or 1))
         limit = min(2000, max(1, int(params.get("limit") or 20)))
-    except (TypeError, ValueError):
-        raise ApiError(1000, "page dan limit harus berupa bilangan bulat")
+        start, end = store.parse_event_range(params.get("start"), params.get("end"))
+    except (TypeError, ValueError) as error:
+        raise ApiError(1000, str(error))
     with store.db() as conn:
-        total, rows = store.list_events(conn, page=page, limit=limit, kind=params.get("kind"))
+        total, rows = store.list_events(
+            conn,
+            page=page,
+            limit=limit,
+            kind=params.get("kind"),
+            start=start,
+            end=end,
+        )
         return {"total": total, "data": [dict(row) for row in rows]}
+
+
+EVENT_EXPORT_LIMIT = 5000
+
+
+@action("event-export")
+def event_export(params):
+    try:
+        start, end = store.parse_event_range(params.get("start"), params.get("end"))
+    except ValueError as error:
+        raise ApiError(1000, str(error))
+    with store.db() as conn:
+        total, rows = store.list_events(
+            conn,
+            page=1,
+            limit=EVENT_EXPORT_LIMIT,
+            kind=params.get("kind"),
+            start=start,
+            end=end,
+            q=params.get("q"),
+        )
+        csv_text = store.events_csv(rows)
+    filename = f"log-aktivitas-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    return {
+        "filename": filename,
+        "content_base64": base64.b64encode(csv_text.encode("utf-8")).decode("ascii"),
+        "count": len(rows),
+        "truncated": total > len(rows),
+    }
+
 
 
 @action("event-clear")

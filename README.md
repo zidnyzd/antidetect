@@ -59,7 +59,9 @@ venv/bin/python scripts/selftest.py
 - [x] ekspor profil terenkripsi kata sandi (AES-256, minimal 8 karakter)
 - [x] filter tag, pilih kolom tersimpan, preset platform akun
 - [x] halaman Dasbor dan halaman API dengan contoh curl dan Selenium
-- [x] log operasi lokal dengan filter jenis, pencarian, dan bersihkan log
+- [x] log operasi lokal dengan filter jenis, pencarian, rentang tanggal,
+  ekspor CSV, dan bersihkan log
+- [x] log Chrome/Proxy per profil (2000 baris terakhir, batas 1 MB)
 - [x] pilih kernel per profil dari folder `kernels/<nama>/chrome` dengan
   validasi path dan fallback ke engine bawaan
 - [ ] penegakan fingerprint GPU di engine (binary 150 tidak punya flag GPU)
@@ -223,8 +225,14 @@ yang tersimpan di localStorage. Dialog profil menyediakan preset platform akun
 mengisi `site_id` dan URL awal yang tetap bisa diedit.
 
 Halaman Log mencatat operasi penting (profil, proxy, extension, grup, tag,
-sistem) di database lokal, dengan filter jenis, pencarian pesan, pagination,
-dan tombol bersihkan. Cookie dan password tidak pernah ikut dicatat.
+sistem) di database lokal, dengan filter jenis, pencarian pesan, rentang
+tanggal, pagination, ekspor CSV, dan tombol bersihkan. Cookie dan password
+tidak pernah ikut dicatat. Menu baris profil punya Log Chrome dan Log Proxy
+(2000 baris terakhir, maksimal 1 MB) dengan tombol salin dan unduh.
+
+Kolom Nama, Grup, dan Terakhir Dibuka bisa diurutkan naik/turun lewat server,
+sehingga urutan tetap konsisten saat berpindah halaman. Profil yang belum
+pernah dibuka selalu berada di akhir urutan Terakhir Dibuka.
 
 Versi Kernel di tab Preferensi memilih binary dari
 `~/.local/share/antidetect/kernels/<nama>/chrome`. Bila hanya satu kernel,

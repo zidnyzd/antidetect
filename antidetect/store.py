@@ -1,4 +1,5 @@
 """SQLite storage for profiles, groups, tags and proxies."""
+import datetime
 import json
 import secrets
 import shutil
@@ -161,29 +162,63 @@ def profile_get(conn, profile_id):
     return conn.execute("SELECT * FROM profiles WHERE id = ?", (int(profile_id),)).fetchone()
 
 
+PROFILE_SORT_FIELDS = ("name", "group", "last_open", "created")
+PROFILE_SORT_DIRS = ("asc", "desc")
+
+
 def list_profiles(conn, page=1, limit=10, group_id=None, name=None, profile_id=None, deleted=False,
-                  tag_id=None):
+                  tag_id=None, sort_by="created", sort_dir="desc"):
+    sort_by = str(sort_by or "created").strip()
+    sort_dir = str(sort_dir or "desc").strip().lower()
+    if sort_by not in PROFILE_SORT_FIELDS:
+        raise ValueError(
+            f"sort_by tidak valid, pilih salah satu dari {', '.join(PROFILE_SORT_FIELDS)}"
+        )
+    if sort_dir not in PROFILE_SORT_DIRS:
+        raise ValueError("sort_dir tidak valid, pilih asc atau desc")
+
     clauses, args = [], []
-    clauses.append("deleted_at IS NOT NULL" if deleted else "deleted_at IS NULL")
+    clauses.append("p.deleted_at IS NOT NULL" if deleted else "p.deleted_at IS NULL")
     if profile_id:
-        clauses.append("id = ?")
+        clauses.append("p.id = ?")
         args.append(int(profile_id))
     if group_id:
-        clauses.append("group_id = ?")
+        clauses.append("p.group_id = ?")
         args.append(int(group_id))
     if tag_id not in (None, "", 0, "0"):
         clauses.append(
-            "EXISTS (SELECT 1 FROM json_each(profiles.tag_ids) WHERE json_each.value = ?)"
+            "EXISTS (SELECT 1 FROM json_each(p.tag_ids) WHERE json_each.value = ?)"
         )
         args.append(int(tag_id))
     if name:
-        clauses.append("name LIKE ?")
+        clauses.append("p.name LIKE ?")
         args.append(f"%{name}%")
     where = f"WHERE {' AND '.join(clauses)}"
-    total = conn.execute(f"SELECT COUNT(*) AS c FROM profiles {where}", args).fetchone()["c"]
-    order = "deleted_at DESC, id DESC" if deleted else "id DESC"
+    join = "LEFT JOIN groups g ON g.id = p.group_id" if sort_by == "group" else ""
+    total = conn.execute(
+        f"SELECT COUNT(*) AS c FROM profiles p {join} {where}", args
+    ).fetchone()["c"]
+
+    if deleted:
+        order = "p.deleted_at DESC, p.id DESC"
+    else:
+        direction = "ASC" if sort_dir == "asc" else "DESC"
+        tie = "ASC" if sort_dir == "asc" else "DESC"
+        if sort_by == "last_open":
+            # Profil yang belum pernah dibuka selalu di akhir.
+            order = (
+                f"p.last_open_time IS NULL ASC, "
+                f"p.last_open_time {direction}, p.id {tie}"
+            )
+        else:
+            column = {
+                "name": "p.name COLLATE NOCASE",
+                "group": "COALESCE(g.title, 'Default') COLLATE NOCASE",
+                "created": "p.created_at",
+            }[sort_by]
+            order = f"{column} {direction}, p.id {tie}"
     rows = conn.execute(
-        f"SELECT * FROM profiles {where} ORDER BY {order} LIMIT ? OFFSET ?",
+        f"SELECT p.* FROM profiles p {join} {where} ORDER BY {order} LIMIT ? OFFSET ?",
         [*args, int(limit), (int(page) - 1) * int(limit)],
     ).fetchall()
     return total, rows
@@ -320,7 +355,7 @@ def add_event(conn, kind, message, profile_id=None):
     conn.commit()
 
 
-def list_events(conn, page=1, limit=20, kind=None):
+def list_events(conn, page=1, limit=20, kind=None, start=None, end=None, q=None):
     clauses, args = [], []
     kind = str(kind or "").strip()
     if kind in EVENT_GROUPS:
@@ -333,21 +368,89 @@ def list_events(conn, page=1, limit=20, kind=None):
     elif kind:
         clauses.append("e.kind = ?")
         args.append(kind)
+    if start:
+        clauses.append("e.created_at >= ?")
+        args.append(start)
+    if end:
+        clauses.append("e.created_at <= ?")
+        args.append(end)
+    needle = str(q or "").strip()
+    if needle:
+        clauses.append("(e.message LIKE ? OR COALESCE(p.name, '') LIKE ?)")
+        args.extend([f"%{needle}%", f"%{needle}%"])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     limit = max(1, int(limit))
     page = max(1, int(page))
-    total = conn.execute(f"SELECT COUNT(*) AS c FROM events e {where}", args).fetchone()["c"]
+    join = "LEFT JOIN profiles p ON p.id = e.profile_id"
+    total = conn.execute(
+        f"SELECT COUNT(*) AS c FROM events e {join} {where}", args
+    ).fetchone()["c"]
     rows = conn.execute(
         f"""SELECT e.id, e.kind, e.message, e.profile_id, e.created_at,
                    p.name AS profile_name
             FROM events e
-            LEFT JOIN profiles p ON p.id = e.profile_id
+            {join}
             {where}
             ORDER BY e.created_at DESC, e.id DESC
             LIMIT ? OFFSET ?""",
         [*args, limit, (page - 1) * limit],
     ).fetchall()
     return total, rows
+
+
+def parse_event_range(start=None, end=None):
+    """Normalize a local ISO date/datetime range to created_at text bounds."""
+    start_text = _event_time(start, end_of_day=False)
+    end_text = _event_time(end, end_of_day=True)
+    if start_text and end_text and start_text > end_text:
+        raise ValueError("start tidak boleh lebih besar dari end")
+    return start_text, end_text
+
+
+def _event_time(value, end_of_day):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10:
+            day = datetime.date.fromisoformat(text)
+            clock = datetime.time(23, 59, 59) if end_of_day else datetime.time(0, 0, 0)
+            moment = datetime.datetime.combine(day, clock)
+        else:
+            moment = datetime.datetime.fromisoformat(text.replace("T", " ", 1))
+    except ValueError:
+        raise ValueError("waktu harus berformat YYYY-MM-DD atau datetime lokal")
+    if moment.tzinfo is not None:
+        moment = moment.astimezone().replace(tzinfo=None)
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _csv_cell(value):
+    text = "" if value is None else str(value)
+    if any(char in text for char in (",", '"', "\r", "\n")):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def events_csv(rows):
+    lines = ["id,waktu,jenis,profil_id,pesan"]
+    for row in rows:
+        lines.append(
+            ",".join(
+                _csv_cell(value)
+                for value in (
+                    row["id"],
+                    row["created_at"],
+                    row["kind"],
+                    row["profile_id"],
+                    row["message"],
+                )
+            )
+        )
+    return "\r\n".join(lines) + "\r\n"
+
 
 
 def clear_events(conn):

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Refresh, Search } from '@element-plus/icons-vue'
+import { Delete, Download, Refresh, Search } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
 
@@ -33,14 +33,21 @@ const total = ref(0)
 const page = ref(1)
 const kind = ref('')
 const search = ref('')
+const dateRange = ref([])
 const loading = ref(false)
 const clearing = ref(false)
+const exporting = ref(false)
 
 let searchTimer = null
 
 const searchTerm = computed(() => search.value.trim().toLowerCase())
+const rangeStart = computed(() => dateRange.value?.[0] || '')
+const rangeEnd = computed(() => dateRange.value?.[1] || '')
+const rangeLabel = computed(() =>
+  rangeStart.value && rangeEnd.value ? `${rangeStart.value} sampai ${rangeEnd.value}` : ''
+)
 const searching = computed(() => !!searchTerm.value)
-const hasFilter = computed(() => searching.value || !!kind.value)
+const hasFilter = computed(() => searching.value || !!kind.value || !!(rangeStart.value && rangeEnd.value))
 
 const filteredRows = computed(() => {
   if (!searching.value) return rows.value
@@ -86,6 +93,8 @@ async function loadPage() {
       page: page.value,
       limit: LIMIT,
       kind: kind.value || undefined,
+      start: rangeStart.value || undefined,
+      end: rangeEnd.value || undefined,
     })
     rows.value = result.data || []
     total.value = result.total || 0
@@ -108,6 +117,8 @@ async function loadSearch() {
       page: 1,
       limit: SEARCH_LIMIT,
       kind: kind.value || undefined,
+      start: rangeStart.value || undefined,
+      end: rangeEnd.value || undefined,
     })
     searchRows.value = result.data || []
     const maxPage = Math.max(1, Math.ceil(filteredRows.value.length / LIMIT))
@@ -161,7 +172,50 @@ async function clearLog() {
   }
 }
 
+function csvBlob(base64) {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return new Blob([bytes], { type: 'text/csv;charset=utf-8' })
+}
+
+async function exportCsv() {
+  exporting.value = true
+  try {
+    const result = await api.exportEvents({
+      kind: kind.value || undefined,
+      start: rangeStart.value || undefined,
+      end: rangeEnd.value || undefined,
+      q: search.value.trim() || undefined,
+    })
+    const url = URL.createObjectURL(csvBlob(result.content_base64))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = result.filename || 'log-aktivitas.csv'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    if (result.truncated) {
+      ElMessage.warning(`${result.count} baris terbaru diekspor, sebagian data dipotong`)
+    } else {
+      ElMessage.success(`${result.count} baris diekspor`)
+    }
+  } catch (error) {
+    ElMessage.error(`Gagal mengekspor log: ${error.message}`)
+  } finally {
+    exporting.value = false
+  }
+}
+
 watch(kind, () => {
+  page.value = 1
+  load()
+})
+
+watch([rangeStart, rangeEnd], () => {
   page.value = 1
   load()
 })
@@ -194,7 +248,18 @@ useOnRefresh(() => load())
                 :value="option.value"
               />
             </el-select>
-            <span class="log-hint">Riwayat aksi lokal, maksimal 2000 baris</span>
+            <el-date-picker
+              v-model="dateRange"
+              class="log-range-picker"
+              type="daterange"
+              value-format="YYYY-MM-DD"
+              format="YYYY-MM-DD"
+              range-separator="s/d"
+              start-placeholder="Tanggal awal"
+              end-placeholder="Tanggal akhir"
+              unlink-panels
+              aria-label="Filter rentang tanggal"
+            />
           </div>
           <div class="toolbar-right">
             <el-input v-model="search" class="search-input" placeholder="Cari pesan" clearable>
@@ -203,9 +268,16 @@ useOnRefresh(() => load())
             <el-tooltip content="Muat ulang log" placement="top" :show-after="200">
               <el-button class="icon-action" :icon="Refresh" aria-label="Muat ulang log" @click="load" />
             </el-tooltip>
+            <el-button :icon="Download" :loading="exporting" @click="exportCsv">Ekspor CSV</el-button>
             <el-button type="danger" :icon="Delete" :disabled="!loadedTotal" :loading="clearing" @click="clearLog">
               Bersihkan Log
             </el-button>
+          </div>
+        </div>
+        <div class="toolbar-row log-scope-row">
+          <div class="toolbar-left">
+            <span v-if="rangeLabel" class="log-range-chip">{{ rangeLabel }}</span>
+            <span class="log-hint">Riwayat aksi lokal, maksimal 2000 baris</span>
           </div>
         </div>
       </div>
