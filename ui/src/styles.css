@@ -907,6 +907,31 @@ button {
   color: var(--ix-text-secondary);
 }
 
+.csv-intro p {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ix-text-secondary);
+}
+
+.csv-intro .mono {
+  font-size: 12px;
+  color: var(--ix-text);
+}
+
+.csv-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px 0 16px;
+}
+
+.csv-file-name {
+  font-size: 12px;
+  color: var(--ix-text);
+}
+
 .table-empty {
   padding: 48px 16px;
   text-align: center;
@@ -1241,6 +1266,18 @@ button {
 
 .form-hint.is-warn {
   color: #b45309;
+}
+
+.engine-note {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--ix-border);
+  border-left: 3px solid var(--ix-primary, #2f6fed);
+  border-radius: var(--ix-radius);
+  background: var(--ix-bg);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ix-text-secondary);
 }
 
 .seed-bar {

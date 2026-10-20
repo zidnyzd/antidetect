@@ -92,12 +92,14 @@ const CPU_CORES = [2, 4, 6, 8, 12, 16]
 const MEMORY = [2, 4, 8]
 const WINDOWS_VERSIONS = ['11', '10', '8.1', '7']
 const MACOS_VERSIONS = ['14', '13', '12']
-const GPU_VENDORS = [
-  'Google Inc. (NVIDIA)',
-  'Google Inc. (Intel)',
-  'Google Inc. (AMD)',
-  'Google Inc. (Apple)',
+const SPOOFING_OPTIONS = [
+  { value: 'font', label: 'Font' },
+  { value: 'audio', label: 'Audio' },
+  { value: 'canvas', label: 'Canvas' },
+  { value: 'clientrects', label: 'ClientRects' },
+  { value: 'gpu', label: 'GPU' },
 ]
+const SPOOFING_VALUES = SPOOFING_OPTIONS.map((option) => option.value)
 const CUSTOM_SITE_ID = 22
 const ACCOUNT_PRESETS = [
   { key: 'Facebook', site_id: 1, site_url: 'https://www.facebook.com/' },
@@ -147,7 +149,7 @@ function emptyForm() {
     device_memory: 8,
     gpu_vendor: '',
     gpu_renderer: '',
-    disable_gpu_fingerprint: false,
+    disable_spoofing: [],
     timezone: 'Asia/Jakarta',
     language: 'id-ID',
     extension_ids: [],
@@ -187,33 +189,16 @@ const builtinKernelPath = computed(() => {
   const builtin = list.find((kernel) => kernel.builtin) || list.find((kernel) => kernel.active) || list[0]
   return builtin?.path || ''
 })
-const selectedKernel = computed(
-  () => kernels.value.find((kernel) => kernel.path === kernelPath.value) || null
-)
-const gpuSupport = computed(() => selectedKernel.value?.supports || null)
-const gpuFieldHint = computed(() => {
-  const support = gpuSupport.value
-  if (!support) return ''
-  if (!form.gpu_vendor && !form.gpu_renderer) return ''
-  const missing = []
-  if (!support.gpu_vendor) missing.push('GPU Vendor')
-  if (!support.gpu_renderer) missing.push('GPU Renderer')
-  if (!missing.length) return ''
-  return `Kernel terpilih belum mendukung ${missing.join(' dan ')}, nilainya disimpan tapi tidak diterapkan engine.`
-})
-const gpuSwitchHint = computed(() => {
-  const support = gpuSupport.value
-  if (!support) return ''
-  if (support.disable_gpu_fingerprint) return 'Jika diaktifkan, kernel memakai --disable-gpu-fingerprint.'
-  if (support.disable_spoofing) {
-    return 'Jika diaktifkan, kernel memakai --disable-spoofing=gpu: situs membaca GPU asli host.'
-  }
-  return 'Kernel terpilih tidak punya cara mematikan spoofing GPU.'
-})
 
 function proxyTypeValue(raw) {
   const value = String(raw || 'direct').toLowerCase()
   return ['http', 'https', 'socks5'].includes(value) ? value : 'direct'
+}
+
+function spoofingValues(raw) {
+  const items = Array.isArray(raw) ? raw : String(raw || '').split(',')
+  const chosen = items.map((item) => String(item).trim().toLowerCase())
+  return SPOOFING_VALUES.filter((name) => chosen.includes(name))
 }
 
 function hostOf(value) {
@@ -275,7 +260,9 @@ function fillFromProfile(profile) {
   form.device_memory = MEMORY.includes(Number(fingerprint.device_memory)) ? Number(fingerprint.device_memory) : 8
   form.gpu_vendor = String(fingerprint.gpu_vendor || '')
   form.gpu_renderer = String(fingerprint.gpu_renderer || '')
-  form.disable_gpu_fingerprint = !!fingerprint.disable_gpu_fingerprint
+  const disabled = spoofingValues(fingerprint.disable_spoofing)
+  if (fingerprint.disable_gpu_fingerprint && !disabled.includes('gpu')) disabled.push('gpu')
+  form.disable_spoofing = SPOOFING_VALUES.filter((name) => disabled.includes(name))
   form.timezone = fingerprint.timezone || 'Asia/Jakarta'
   form.language = fingerprint.language || 'id-ID'
   const preference = profile.preference_config || {}
@@ -430,6 +417,7 @@ function validateForm() {
 function fingerprintPayload() {
   const saved = props.profile?.fingerprint_config
   const base = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}
+  const disableSpoofing = SPOOFING_VALUES.filter((name) => form.disable_spoofing.includes(name))
   return {
     ...base,
     platform: form.platform,
@@ -438,7 +426,8 @@ function fingerprintPayload() {
     device_memory: Number(form.device_memory),
     gpu_vendor: form.gpu_vendor.trim() || null,
     gpu_renderer: form.gpu_renderer.trim() || null,
-    disable_gpu_fingerprint: !!form.disable_gpu_fingerprint,
+    disable_spoofing: disableSpoofing,
+    disable_gpu_fingerprint: disableSpoofing.includes('gpu'),
     timezone: form.timezone,
     language: form.language,
   }
@@ -834,33 +823,25 @@ async function testProxy() {
               <el-option v-for="memory in MEMORY" :key="memory" :label="memory" :value="memory" />
             </el-select>
           </el-form-item>
-          <el-form-item label="GPU Vendor">
+          <p class="engine-note">
+            GPU vendor dan renderer dibuat otomatis dari seed fingerprint. Engine 150 tidak menerima nilai GPU manual.
+          </p>
+          <el-form-item label="Matikan spoofing">
             <el-select
-              v-model="form.gpu_vendor"
-              filterable
-              allow-create
-              default-first-option
-              clearable
-              placeholder="Ikuti seed atau tulis vendor"
-              class="field-260"
+              v-model="form.disable_spoofing"
+              multiple
+              class="field-320"
+              placeholder="Pilih komponen yang memakai nilai asli host"
             >
-              <el-option v-for="vendor in GPU_VENDORS" :key="vendor" :label="vendor" :value="vendor" />
+              <el-option
+                v-for="option in SPOOFING_OPTIONS"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
             </el-select>
           </el-form-item>
-          <el-form-item label="GPU Renderer">
-            <el-input
-              v-model="form.gpu_renderer"
-              placeholder="ANGLE (NVIDIA, NVIDIA GeForce RTX 5060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
-            />
-          </el-form-item>
-          <p v-if="gpuFieldHint" class="form-hint is-warn">{{ gpuFieldHint }}</p>
-          <el-form-item label="GPU Host">
-            <div class="switch-cell">
-              <el-switch v-model="form.disable_gpu_fingerprint" />
-              <span class="switch-label">Tampilkan GPU asli</span>
-            </div>
-          </el-form-item>
-          <p v-if="gpuSwitchHint" class="form-hint">{{ gpuSwitchHint }}</p>
+          <p class="form-hint">GPU memakai GPU asli host; opsi lain memakai nilai asli host untuk komponen tersebut.</p>
           <el-form-item label="Zona Waktu">
             <el-select
               v-model="form.timezone"

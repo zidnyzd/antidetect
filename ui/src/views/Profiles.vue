@@ -9,6 +9,7 @@ import CookieDialog from '../components/CookieDialog.vue'
 import BookmarkDialog from '../components/BookmarkDialog.vue'
 import PasswordDialog from '../components/PasswordDialog.vue'
 import ProfileLogDialog from '../components/ProfileLogDialog.vue'
+import ImportCsvDialog from '../components/ImportCsvDialog.vue'
 import GroupManager from '../components/GroupManager.vue'
 
 const POOL_LIMIT = 1000
@@ -79,6 +80,7 @@ const logKind = ref('chrome')
 const gostLogs = ref({})
 const importInput = ref(null)
 const importBusy = ref(false)
+const csvVisible = ref(false)
 const bulkKind = ref('')
 const bulkVisible = ref(false)
 const arrangeBusy = ref(false)
@@ -531,6 +533,13 @@ async function onImportFile(event) {
   } finally {
     importBusy.value = false
   }
+}
+
+async function onCsvImported(result) {
+  page.value = 1
+  clearSelection()
+  await Promise.all([loadProfiles(), loadGroups()])
+  if (result?.created) ElMessage.success(`${result.created} profil diimpor dari CSV`)
 }
 
 function base64ToBlob(base64) {
@@ -1024,6 +1033,7 @@ useOnRefresh(() => refreshAll())
               </el-dropdown>
             </div>
             <el-button :icon="Upload" :loading="importBusy" @click="triggerImport">Impor Profil</el-button>
+            <el-button :icon="Document" @click="csvVisible = true">Impor CSV</el-button>
             <input
               ref="importInput"
               class="profile-file-input"
@@ -1320,6 +1330,8 @@ useOnRefresh(() => refreshAll())
       @saved="onSaved"
       @tags-changed="loadTags"
     />
+
+    <ImportCsvDialog v-model="csvVisible" @imported="onCsvImported" />
 
     <GroupManager v-model="groupManagerVisible" @changed="onGroupsChanged" />
 

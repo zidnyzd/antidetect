@@ -34,6 +34,7 @@ GPU_FLAG_NAMES = {
     "disable_gpu_fingerprint": "disable-gpu-fingerprint",
     "disable_spoofing": "disable-spoofing",
 }
+DISABLE_SPOOFING_VALUES = ("font", "audio", "canvas", "clientrects", "gpu")
 
 _open = {}
 _flag_cache = {}
@@ -247,6 +248,39 @@ def _flag_enabled(value):
     return value is True or value == 1
 
 
+def parse_disable_spoofing(value):
+    """Normalize fingerprint_config.disable_spoofing to known switch names."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = []
+        for item in value:
+            if isinstance(item, str) and "," in item:
+                items.extend(item.split(","))
+            else:
+                items.append(item)
+    else:
+        raise PreferenceError("disable_spoofing harus berupa teks atau daftar")
+
+    chosen = []
+    for item in items:
+        if not isinstance(item, str):
+            raise PreferenceError("disable_spoofing hanya menerima nama komponen teks")
+        name = item.strip().lower()
+        if not name:
+            continue
+        if name not in DISABLE_SPOOFING_VALUES:
+            raise PreferenceError(
+                "disable_spoofing tidak dikenal: "
+                f"{name}, pilih salah satu dari {', '.join(DISABLE_SPOOFING_VALUES)}"
+            )
+        if name not in chosen:
+            chosen.append(name)
+    return [name for name in DISABLE_SPOOFING_VALUES if name in chosen]
+
+
 def _preference_args(preferences):
     args = []
     if not isinstance(preferences, dict):
@@ -314,11 +348,18 @@ def _gpu_args(fp, binary=None):
     renderer = str(fp.get("gpu_renderer") or "").strip()
     if renderer and flag_supported("fingerprint-gpu-renderer", binary):
         args.append(f"--fingerprint-gpu-renderer={renderer}")
-    if fp.get("disable_gpu_fingerprint"):
-        if flag_supported("disable-gpu-fingerprint", binary):
-            args.append("--disable-gpu-fingerprint")
-        elif flag_supported("disable-spoofing", binary):
-            args.append("--disable-spoofing=gpu")
+
+    disabled = set(parse_disable_spoofing(fp.get("disable_spoofing")))
+    if _flag_enabled(fp.get("disable_gpu_fingerprint")):
+        disabled.add("gpu")
+    ordered = [name for name in DISABLE_SPOOFING_VALUES if name in disabled]
+    if not ordered:
+        return args
+
+    if flag_supported("disable-spoofing", binary):
+        args.append("--disable-spoofing=" + ",".join(ordered))
+    elif ordered == ["gpu"] and flag_supported("disable-gpu-fingerprint", binary):
+        args.append("--disable-gpu-fingerprint")
     return args
 
 
