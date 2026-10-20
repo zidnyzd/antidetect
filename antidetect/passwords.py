@@ -111,3 +111,42 @@ def list_saved_passwords(profile_id):
         return _read_snapshot(path)
     except sqlite3.DatabaseError as error:
         raise PasswordError(f"gagal membaca password: {error}")
+
+
+def delete_password(profile_id, origin_url, username):
+    profile_id = int(profile_id)
+    if launcher.is_open(profile_id):
+        raise PasswordError("tutup profil dulu")
+    origin = str(origin_url or "")
+    if not origin:
+        raise PasswordError("origin_url wajib diisi")
+    user = "" if username is None else str(username)
+
+    path = _database_path(profile_id)
+    if not path.is_file():
+        raise PasswordError("password tidak ditemukan")
+    try:
+        shutil.copy2(path, path.with_name(path.name + ".bak"))
+    except OSError as error:
+        raise PasswordError(f"gagal membuat backup password: {error}")
+
+    try:
+        conn = sqlite3.connect(path, timeout=5)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(logins)")}
+            if "origin_url" not in columns or "username_value" not in columns:
+                raise PasswordError("password tidak ditemukan")
+            cursor = conn.execute(
+                "DELETE FROM logins WHERE origin_url = ? AND username_value = ?",
+                (origin, user),
+            )
+            conn.commit()
+            deleted = cursor.rowcount
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as error:
+        raise PasswordError(f"gagal menghapus password: {error}")
+
+    if deleted <= 0:
+        raise PasswordError("password tidak ditemukan")
+    return {"deleted": deleted}

@@ -408,6 +408,60 @@ def profile_update_groups_batches(params):
 BATCH_FIELDS = ("note", "color", "proxy_config", "fingerprint_config")
 
 
+@action("profile-bookmark-add")
+def profile_bookmark_add(params):
+    pid = _known_pid(params)
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
+    try:
+        result = bookmarks.add_bookmark(
+            pid, params.get("name"), params.get("url"), params.get("folder")
+        )
+    except bookmarks.BookmarkError as error:
+        raise ApiError(1004, str(error))
+    _event(
+        "profile-bookmark-add",
+        f'Bookmark "{_event_name(result["name"])}" ditambahkan ke profil "{_event_name(name)}"',
+        pid,
+    )
+    return result
+
+
+@action("profile-bookmark-delete")
+def profile_bookmark_delete(params):
+    pid = _known_pid(params)
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
+    try:
+        result = bookmarks.delete_bookmark(pid, params.get("bookmark_id"))
+    except bookmarks.BookmarkError as error:
+        raise ApiError(1004, str(error))
+    _event(
+        "profile-bookmark-delete",
+        f'Bookmark "{_event_name(result["name"])}" dihapus dari profil "{_event_name(name)}"',
+        pid,
+    )
+    return result
+
+
+@action("profile-delete-saved-password")
+def profile_delete_saved_password(params):
+    pid = _known_pid(params)
+    with store.db() as conn:
+        name = _profile_name(conn, pid)
+    origin = str(params.get("origin_url") or "")
+    try:
+        result = passwords.delete_password(pid, origin, params.get("username"))
+    except passwords.PasswordError as error:
+        raise ApiError(1004, str(error))
+    _event(
+        "profile-delete-saved-password",
+        f'Password {origin} profil "{_event_name(name)}" dihapus',
+        pid,
+    )
+    return result
+
+
 @action("profile-batch-update")
 def profile_batch_update(params):
     ids = _id_list(params)

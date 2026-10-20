@@ -54,7 +54,8 @@ venv/bin/python scripts/selftest.py
   pemakaian) dan pemilihan extension per profil
 - [x] info engine/kernel di Pengaturan, acak seed, kolom GPU Vendor/Renderer
   dan opsi tampilkan GPU host (binary 150 belum menerapkan flag GPU)
-- [x] ekspor/impor profil (JSON), penampil bookmark dan password tersimpan
+- [x] ekspor/impor profil (JSON), kelola bookmark (tambah/hapus) dan hapus
+  password tersimpan per entri
 - [x] ekspor profil terenkripsi kata sandi (AES-256, minimal 8 karakter)
 - [x] filter tag, pilih kolom tersimpan, preset platform akun
 - [x] halaman Dasbor dan halaman API dengan contoh curl dan Selenium
@@ -208,8 +209,10 @@ Extension di dialog profil memilih extension yang dimuat saat profil dibuka.
 Profil bisa diekspor ke JSON dan diimpor kembali (nama diberi akhiran
 "(impor)", seed baru, cookie ikut). Menu baris punya Ekspor Terenkripsi yang
 meminta kata sandi; impor file terenkripsi akan meminta kata sandi yang sama.
-Menu baris juga menyediakan penampil Bookmark dan Password Tersimpan; password
-didekripsi lokal dan hanya ditampilkan saat tombol mata ditekan.
+Menu baris juga menyediakan Bookmark (tambah dan hapus, folder otomatis
+dibuat) dan Password Tersimpan (hapus per entri, ekspor CSV). Password
+didekripsi lokal dan hanya ditampilkan saat tombol mata ditekan. Menambah atau
+mengubah password belum didukung engine, simpan lewat halaman login di browser.
 
 Dasbor jadi halaman pertama berisi ringkasan profil, grup, extension, proxy,
 dan profil terbaru. Halaman API menampilkan base URL lokal, status health,

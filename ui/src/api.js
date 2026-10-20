@@ -47,7 +47,16 @@ export const api = {
   importProfile: (content, password = '') =>
     call('profile-import', { content_base64: content, ...(password ? { password } : {}) }),
   bookmarks: (profileId) => call('profile-bookmarks', { profile_id: profileId }),
+  addBookmark: (profileId, bookmark) => call('profile-bookmark-add', { profile_id: profileId, ...bookmark }),
+  deleteBookmark: (profileId, bookmarkId) =>
+    call('profile-bookmark-delete', { profile_id: profileId, bookmark_id: bookmarkId }),
   savedPasswords: (profileId) => call('profile-saved-passwords', { profile_id: profileId }),
+  deleteSavedPassword: (profileId, originUrl, username) =>
+    call('profile-delete-saved-password', {
+      profile_id: profileId,
+      origin_url: originUrl,
+      username,
+    }),
   clearCache: (profileId) => call('profile-clear-cache', { profile_id: profileId }),
   clearCacheAndCookies: (profileId) => call('profile-clear-cache-and-cookies', { profile_id: profileId }),
   clearCacheKeepExtensions: (profileId) => call('profile-clear-cache-keep-extensions', { profile_id: profileId }),
