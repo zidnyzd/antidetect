@@ -143,6 +143,61 @@ error per nomor baris.
 Backend memakai action `profile-import-csv` dengan payload
 `{"text": "<isi file csv>"}`.
 
+## Riwayat cek proxy
+
+Setiap proxy yang diuji lewat tombol Tes di halaman Proxy, atau lewat action
+`proxy-check` dengan `proxy_id`, hasilnya dicatat di tabel `proxy_checks`.
+Kolom `Cek Terakhir` di tabel proxy menampilkan hasil terakhir: IP dan latensi
+kalau berhasil, "Gagal: <pesan>" kalau gagal, dan "Belum pernah" kalau proxy
+belum pernah diuji. Tombol Riwayat di tiap baris membuka daftar hasil per
+proxy, lengkap dengan tombol Muat ulang, Bersihkan riwayat, dan Tutup.
+Kolom Cek Terakhir bisa disembunyikan lewat tombol Pilih Kolom.
+
+Maksimal 500 baris riwayat per proxy, baris paling lama dibuang otomatis.
+Action yang tersedia:
+
+| action | payload | hasil |
+| --- | --- | --- |
+| `proxy-check-history` | `{proxy_id, limit}` | `{total, data}` terbaru lebih dulu. Tanpa `proxy_id` semua baris riwayat dikembalikan |
+| `proxy-check-history-clear` | `{proxy_id}` | `{count}`, jumlah baris yang dihapus |
+
+Kolom `data` berisi `checked_at`, `ok`, `ip`, `latency_ms`, dan `error`.
+
+## Tes proxy sebelum disimpan
+
+Action `proxy-validate` menjalankan cek proxy tanpa menyimpan dan tanpa
+menambah riwayat. Action `proxy-create` dan `proxy-update` menerima parameter
+opsional `validate: true`. Kalau nilainya true, proxy diuji dulu dan kalau
+gagal permintaan ditolak dengan kode 1000 dan pesan "Proxy gagal diuji:
+<alasan>", jadi proxy tidak tersimpan. Tanpa parameter itu perilaku lama
+berlaku, sehingga SDK yang tidak mengirim `validate` tidak terpengaruh.
+
+Di UI, switch "Tes sebelum menyimpan" di dialog tambah/edit proxy memakai
+action `proxy-validate` sebelum menyimpan. Switch mati secara bawaan.
+
+## Template profil
+
+Template menyimpan salinan konfigurasi satu profil supaya profil baru dibuat
+dengan setting yang sama. Halaman Template punya tombol Simpan Template yang
+memilih profil sumber dari daftar profil, lalu membuat profil baru dari
+template dengan nama baru. Seed profil baru dibuat otomatis, jadi hasil
+fingerprintnya berbeda dari template.
+
+Grup disalin kalau grupnya masih ada, kalau tidak profil baru masuk ke grup
+Default. Proxy juga hanya disalin kalau baris proxy-nya masih ada di daftar
+proxy, kalau tidak profil baru memakai proxy direct. Maksimal 50 template,
+nama template maksimal 80 karakter dan harus unik.
+
+| action | payload | hasil |
+| --- | --- | --- |
+| `template-list` | `{page, limit}` | `{total, data}` dengan `id`, `name`, `created_at`, `profile_count` |
+| `template-save` | `{profile_id, name}` | `{id, name, profile_count}` |
+| `template-delete` | `{id}` | `true` |
+| `template-create-profile` | `{id, name}` | `{profile_id, name, group_id, proxy_config}` |
+
+Nama template kosong, nama yang sudah dipakai, dan template yang sudah 50 buah
+ditolak dengan kode 1000.
+
 ## Yang belum didukung engine
 
 - `resolving_power` (lebar x tinggi layar). Flag `--fingerprint-screen-width`
@@ -250,6 +305,13 @@ Dialog bisa mengunduh template berisi header dan satu baris contoh, memilih
 file CSV, lalu menampilkan jumlah profil dibuat, grup baru, proxy baru, dan
 daftar error per baris. Grup dan proxy yang disebut di CSV dibuat otomatis
 bila belum ada.
+
+Halaman Proxy punya kolom Cek Terakhir, tombol Riwayat per baris yang membuka
+dialog riwayat cek proxy, dan pemilih kolom untuk menyembunyikan kolom Cek
+Terakhir. Dialog tambah proxy punya switch "Tes sebelum menyimpan": kalau
+dinyalakan, proxy diuji dulu dan yang gagal tidak disimpan. Halaman Template
+menyimpan template dari profil yang dipilih, membuat profil baru dari template,
+dan menghapus template dengan konfirmasi.
 
 Halaman Extension menyimpan extension lokal dari unggahan zip/crx, menampilkan
 versi dan ukurannya, serta menolak hapus selama masih dipakai profil. Tab

@@ -33,6 +33,26 @@ const ACTIONS = [
     payload: { proxy_type: 'http', proxy_ip: '203.0.113.10', proxy_port: 8080 },
   },
   {
+    name: 'proxy-validate',
+    summary: 'Uji proxy tanpa menyimpan dan tanpa menambah riwayat.',
+    payload: { proxy_type: 'http', proxy_ip: '203.0.113.10', proxy_port: 8080 },
+  },
+  {
+    name: 'proxy-check-history',
+    summary: 'Riwayat cek proxy, terbaru lebih dulu. Tanpa proxy_id semua baris.',
+    payload: { proxy_id: 1, limit: 50 },
+  },
+  {
+    name: 'template-save',
+    summary: 'Simpan template profil. Maksimal 50 template, nama wajib unik.',
+    payload: { profile_id: 1, name: 'Template Jualan Utama' },
+  },
+  {
+    name: 'template-create-profile',
+    summary: 'Buat profil baru dari template. Seed profil baru dibuat otomatis.',
+    payload: { id: 1, name: 'Profil dari Template' },
+  },
+  {
     name: 'extension-list',
     summary: 'Daftar extension terpasang dengan nama, versi, dan path.',
     payload: { page: 1, limit: 20 },

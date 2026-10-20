@@ -7,6 +7,7 @@ import RecycleBin from './views/RecycleBin.vue'
 import Settings from './views/Settings.vue'
 import ApiDocs from './views/ApiDocs.vue'
 import Logs from './views/Logs.vue'
+import Templates from './views/Templates.vue'
 
 export default createRouter({
   history: createWebHashHistory(),
@@ -41,6 +42,12 @@ export default createRouter({
       name: 'extensions',
       component: Extensions,
       meta: { section: 'Profil Browser', crumb: 'Extension' },
+    },
+    {
+      path: '/templates',
+      name: 'templates',
+      component: Templates,
+      meta: { section: 'Profil Browser', crumb: 'Template' },
     },
     {
       path: '/settings',

@@ -406,7 +406,8 @@ button {
 
 .profiles-page,
 .proxies-page,
-.extensions-page {
+.extensions-page,
+.templates-page {
   min-height: calc(100vh - var(--ix-topbar-height) - 40px);
   display: flex;
   flex-direction: column;
@@ -414,7 +415,8 @@ button {
 
 .profiles-page > .surface,
 .proxies-page > .surface,
-.extensions-page > .surface {
+.extensions-page > .surface,
+.templates-page > .surface {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -422,7 +424,8 @@ button {
 
 .profiles-page .table-footer,
 .proxies-page .table-footer,
-.extensions-page .table-footer {
+.extensions-page .table-footer,
+.templates-page .table-footer {
   margin-top: auto;
 }
 
@@ -824,6 +827,55 @@ button {
 
 .proxy-check-result.is-fail {
   color: var(--ix-danger);
+}
+
+.proxy-switch-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.proxy-switch-cell .form-hint {
+  flex: 1;
+  margin: 0;
+}
+
+.proxy-history-dialog .history-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--ix-text-secondary);
+}
+
+.proxy-history-dialog .history-count {
+  font-size: 12px;
+  color: var(--ix-muted);
+}
+
+.proxy-history-table .cell-sub {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-full {
+  width: 100%;
+}
+
+.dialog-footer .el-button.danger-action {
+  color: var(--ix-danger);
+  border-color: #f0b4ad;
+}
+
+.dialog-footer .el-button.danger-action:hover {
+  color: #ffffff;
+  border-color: var(--ix-danger);
+  background: var(--ix-danger);
 }
 
 .import-textarea textarea {

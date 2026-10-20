@@ -63,10 +63,51 @@ def _fail(message):
     return {"ok": False, "error": str(message) or "cek proxy gagal"}
 
 
-def check_proxy(params):
+def _proxy_id(params):
+    value = params.get("proxy_id")
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_check(proxy_id, result):
+    """Simpan hasil cek ke riwayat. Gagal menyimpan tidak boleh merusak cek."""
+    if proxy_id is None:
+        return
+    try:
+        with store.db() as conn:
+            if conn.execute(
+                "SELECT 1 FROM proxies WHERE id = ?", (proxy_id,)
+            ).fetchone() is None:
+                return
+            store.add_proxy_check(
+                conn,
+                proxy_id,
+                bool(result.get("ok")),
+                result.get("ip"),
+                result.get("latency_ms"),
+                result.get("error"),
+            )
+    except Exception:
+        pass
+
+
+def check_proxy(params, record_history=True):
+    """Cek proxy. record_history=False dipakai untuk validasi pra simpan."""
+    params = params or {}
+    result = _run_check(params)
+    if record_history:
+        _save_check(_proxy_id(params), result)
+    return result
+
+
+def _run_check(params):
     started = time.monotonic()
     deadline = started + TIMEOUT
-    config, error = _config(params or {})
+    config, error = _config(params)
     if error:
         return _fail(error)
     try:

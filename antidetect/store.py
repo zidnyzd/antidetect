@@ -51,6 +51,22 @@ CREATE TABLE IF NOT EXISTS proxies (
     note TEXT,
     tag TEXT
 );
+CREATE TABLE IF NOT EXISTS proxy_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy_id INTEGER,
+    checked_at TEXT,
+    ok INTEGER,
+    ip TEXT,
+    latency_ms INTEGER,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_proxy_checks_proxy ON proxy_checks (proxy_id, checked_at);
+CREATE TABLE IF NOT EXISTS templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    payload TEXT,
+    created_at TEXT
+);
 CREATE TABLE IF NOT EXISTS extensions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     slug TEXT UNIQUE,
@@ -337,6 +353,112 @@ def create_proxy(conn, data):
     )
     conn.commit()
     return cur.lastrowid
+
+
+PROXY_CHECK_LIMIT = 500
+
+
+def add_proxy_check(conn, proxy_id, ok, ip=None, latency_ms=None, error=None):
+    """Catat satu hasil cek proxy dan buang baris lama di luar batas per proxy."""
+    cur = conn.execute(
+        """INSERT INTO proxy_checks (proxy_id, checked_at, ok, ip, latency_ms, error)
+           VALUES (?,?,?,?,?,?)""",
+        (
+            int(proxy_id),
+            now(),
+            1 if ok else 0,
+            ip,
+            latency_ms,
+            error,
+        ),
+    )
+    conn.execute(
+        """DELETE FROM proxy_checks WHERE proxy_id = ? AND id NOT IN
+           (SELECT id FROM proxy_checks WHERE proxy_id = ? ORDER BY id DESC LIMIT ?)""",
+        (int(proxy_id), int(proxy_id), PROXY_CHECK_LIMIT),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_proxy_checks(conn, proxy_id=None, limit=50):
+    """Riwayat cek proxy, terbaru lebih dulu. Tanpa proxy_id semua baris."""
+    try:
+        limit = max(1, min(int(limit), PROXY_CHECK_LIMIT))
+    except (TypeError, ValueError):
+        limit = 50
+    if proxy_id in (None, ""):
+        total = conn.execute("SELECT COUNT(*) AS c FROM proxy_checks").fetchone()["c"]
+        rows = conn.execute(
+            "SELECT * FROM proxy_checks ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return total, rows
+    proxy_id = int(proxy_id)
+    total = conn.execute(
+        "SELECT COUNT(*) AS c FROM proxy_checks WHERE proxy_id = ?", (proxy_id,)
+    ).fetchone()["c"]
+    rows = conn.execute(
+        "SELECT * FROM proxy_checks WHERE proxy_id = ? ORDER BY id DESC LIMIT ?",
+        (proxy_id, limit),
+    ).fetchall()
+    return total, rows
+
+
+def latest_proxy_check(conn, proxy_id):
+    return conn.execute(
+        "SELECT * FROM proxy_checks WHERE proxy_id = ? ORDER BY id DESC LIMIT 1",
+        (int(proxy_id),),
+    ).fetchone()
+
+
+def clear_proxy_checks(conn, proxy_id):
+    cur = conn.execute(
+        "DELETE FROM proxy_checks WHERE proxy_id = ?", (int(proxy_id),)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def list_templates(conn, page=1, limit=10):
+    page = max(1, int(page))
+    limit = max(1, min(int(limit), 100))
+    total = conn.execute("SELECT COUNT(*) AS c FROM templates").fetchone()["c"]
+    rows = conn.execute(
+        "SELECT * FROM templates ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        (limit, (page - 1) * limit),
+    ).fetchall()
+    return total, rows
+
+
+def get_template(conn, template_id):
+    return conn.execute(
+        "SELECT * FROM templates WHERE id = ?", (int(template_id),)
+    ).fetchone()
+
+
+def template_name_taken(conn, name):
+    return conn.execute(
+        "SELECT 1 FROM templates WHERE lower(name) = lower(?)", (name,)
+    ).fetchone() is not None
+
+
+def count_templates(conn):
+    return conn.execute("SELECT COUNT(*) AS c FROM templates").fetchone()["c"]
+
+
+def create_template(conn, name, payload):
+    cur = conn.execute(
+        "INSERT INTO templates (name, payload, created_at) VALUES (?,?,?)",
+        (name, json.dumps(payload), now()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def delete_template(conn, template_id):
+    cur = conn.execute("DELETE FROM templates WHERE id = ?", (int(template_id),))
+    conn.commit()
+    return cur.rowcount
 
 
 EVENT_LIMIT = 2000

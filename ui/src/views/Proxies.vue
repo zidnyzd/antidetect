@@ -1,11 +1,23 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Download, Edit, Plus, Refresh, Upload } from '@element-plus/icons-vue'
+import { Clock, Delete, Download, Edit, Menu, Plus, Refresh, Upload } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
+import ProxyHistoryDialog from '../components/ProxyHistoryDialog.vue'
 
 const PROXY_TYPES = ['http', 'https', 'socks5']
+const COLUMN_STORAGE_KEY = 'antidetect.proxies.columns'
+
+function loadColumnSetting() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COLUMN_STORAGE_KEY) || '')
+    if (typeof saved === 'boolean') return saved
+  } catch {
+    return true
+  }
+  return true
+}
 
 const rows = ref([])
 const total = ref(0)
@@ -16,6 +28,10 @@ const dialogVisible = ref(false)
 const editing = ref(null)
 const busy = ref(false)
 const errors = reactive({ proxy_ip: '', proxy_port: '' })
+const showLastCheck = ref(loadColumnSetting())
+const validateBeforeSave = ref(false)
+const historyVisible = ref(false)
+const historyProxy = ref(null)
 
 const importVisible = ref(false)
 const importBusy = ref(false)
@@ -59,15 +75,56 @@ function applyCheck(target, result) {
   }
 }
 
+function localTimestamp() {
+  const now = new Date()
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+}
+
+function localCheck(result) {
+  return {
+    checked_at: localTimestamp(),
+    ok: !!result?.ok,
+    ip: result?.ip || null,
+    latency_ms: result?.latency_ms ?? null,
+    error: result?.error || null,
+  }
+}
+
+function lastCheck(row) {
+  return row.last_check || null
+}
+
+function lastCheckText(row) {
+  const check = lastCheck(row)
+  if (!check) return 'Belum pernah'
+  if (check.ok) {
+    const latency = check.latency_ms != null ? `${check.latency_ms} ms` : 'latensi tidak diketahui'
+    return `${check.ip || 'IP tidak diketahui'} · ${latency}`
+  }
+  return `Gagal: ${check.error || 'cek proxy gagal'}`
+}
+
+function toggleLastCheck(value) {
+  showLastCheck.value = value
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(value))
+}
+
 async function checkRow(row) {
   checks[row.id] = { loading: true, ok: null, text: '' }
   try {
     const result = await api.checkProxy({ proxy_id: row.id })
     checks[row.id] = { loading: false }
     applyCheck(checks[row.id], result)
+    row.last_check = localCheck(result)
   } catch (error) {
     checks[row.id] = { loading: false, ok: false, text: error.message }
   }
+}
+
+function openHistory(row) {
+  historyProxy.value = row
+  historyVisible.value = true
 }
 
 async function testConnection() {
@@ -123,6 +180,7 @@ function openCreate() {
   dialogCheck.loading = false
   dialogCheck.ok = null
   dialogCheck.text = ''
+  validateBeforeSave.value = false
   clearErrors()
   dialogVisible.value = true
 }
@@ -141,6 +199,7 @@ function openEdit(row) {
   dialogCheck.loading = false
   dialogCheck.ok = null
   dialogCheck.text = ''
+  validateBeforeSave.value = false
   clearErrors()
   dialogVisible.value = true
 }
@@ -164,6 +223,19 @@ async function submit() {
       proxy_user: form.proxy_user.trim() || null,
       proxy_password: form.proxy_password || null,
       note: form.note.trim() || null,
+    }
+    if (validateBeforeSave.value) {
+      const result = await api.validateProxy({
+        proxy_type: payload.proxy_type,
+        proxy_ip: payload.proxy_ip,
+        proxy_port: payload.proxy_port,
+        proxy_user: payload.proxy_user,
+        proxy_password: payload.proxy_password,
+      })
+      if (!result?.ok) {
+        ElMessage.error(`Proxy gagal diuji: ${result?.error || 'cek proxy gagal'}`)
+        return
+      }
     }
     if (isEdit.value) {
       await api.updateProxy({ id: editing.value.id, ...payload })
@@ -313,6 +385,17 @@ useOnRefresh(() => load())
           <el-button :icon="Download" @click="openExport">Ekspor</el-button>
         </div>
         <div class="toolbar-right">
+          <el-dropdown trigger="click" :hide-on-click="false">
+            <el-button :icon="Menu" aria-label="Pilih kolom">Pilih Kolom</el-button>
+            <template #dropdown>
+              <div class="column-picker">
+                <el-checkbox
+                  :model-value="showLastCheck"
+                  @change="toggleLastCheck"
+                >Cek Terakhir</el-checkbox>
+              </div>
+            </template>
+          </el-dropdown>
           <el-tooltip content="Muat ulang daftar" placement="top" :show-after="200">
             <el-button class="icon-action" :icon="Refresh" aria-label="Muat ulang daftar" @click="load" />
           </el-tooltip>
@@ -326,27 +409,27 @@ useOnRefresh(() => load())
         :data="rows"
         row-key="id"
       >
-        <el-table-column label="Tipe" width="100">
+        <el-table-column label="Tipe" width="96">
           <template #default="{ row }">
             <span class="cell-main">{{ typeLabel(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Host:Port" width="240">
+        <el-table-column label="Host:Port" width="200">
           <template #default="{ row }">
             <span class="mono">{{ hostLabel(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Autentikasi" width="120">
+        <el-table-column label="Autentikasi" width="104">
           <template #default="{ row }">
             <span :class="authLabel(row) === 'Ya' ? 'cell-main' : 'cell-sub'">{{ authLabel(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Catatan" min-width="200">
+        <el-table-column label="Catatan" min-width="160">
           <template #default="{ row }">
             <span class="cell-sub" :title="row.note || ''">{{ row.note || 'Tanpa catatan' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Status" width="250">
+        <el-table-column label="Status" width="206">
           <template #default="{ row }">
             <div class="proxy-check-cell">
               <el-button size="small" :loading="checks[row.id]?.loading" @click="checkRow(row)">Tes</el-button>
@@ -358,9 +441,28 @@ useOnRefresh(() => load())
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="Operasi" width="120" fixed="right">
+        <el-table-column v-if="showLastCheck" label="Cek Terakhir" width="186">
+          <template #default="{ row }">
+            <span
+              v-if="lastCheck(row)"
+              :class="['proxy-check-result', lastCheck(row).ok ? 'is-ok' : 'is-fail']"
+              :title="lastCheckText(row)"
+            >{{ lastCheckText(row) }}</span>
+            <span v-else class="cell-sub">Belum pernah</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="Operasi" width="156" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
+              <el-tooltip content="Riwayat cek proxy" placement="top" :show-after="200">
+                <el-button
+                  size="small"
+                  class="icon-action"
+                  :icon="Clock"
+                  aria-label="Riwayat cek proxy"
+                  @click="openHistory(row)"
+                />
+              </el-tooltip>
               <el-tooltip content="Edit proxy" placement="top" :show-after="200">
                 <el-button size="small" class="icon-action" :icon="Edit" aria-label="Edit proxy" @click="openEdit(row)" />
               </el-tooltip>
@@ -409,7 +511,7 @@ useOnRefresh(() => load())
       class="proxy-dialog"
       :close-on-click-modal="false"
     >
-      <el-form label-width="120px" label-position="right" class="dialog-form" @submit.prevent>
+      <el-form label-width="160px" label-position="right" class="dialog-form" @submit.prevent>
         <el-form-item label="Tipe">
           <el-select v-model="form.proxy_type" class="field-180">
             <el-option v-for="type in PROXY_TYPES" :key="type" :label="type.toUpperCase()" :value="type" />
@@ -442,6 +544,12 @@ useOnRefresh(() => load())
               v-if="dialogCheck.text"
               :class="['proxy-check-result', dialogCheck.ok ? 'is-ok' : 'is-fail']"
             >{{ dialogCheck.text }}</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="Tes sebelum menyimpan">
+          <div class="proxy-switch-cell">
+            <el-switch v-model="validateBeforeSave" />
+            <span class="form-hint">Proxy diuji dulu. Kalau gagal, proxy tidak disimpan.</span>
           </div>
         </el-form-item>
         <el-form-item label="Catatan">
@@ -555,5 +663,7 @@ useOnRefresh(() => load())
         </div>
       </template>
     </el-dialog>
+
+    <ProxyHistoryDialog v-model="historyVisible" :proxy="historyProxy" @cleared="load" />
   </div>
 </template>

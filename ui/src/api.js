@@ -77,10 +77,26 @@ export const api = {
   updateProxy: (proxy) => call('proxy-update', proxy),
   deleteProxy: (id) => call('proxy-delete', { id }),
   checkProxy: (payload = {}) => call('proxy-check', payload),
+  validateProxy: (payload = {}) => call('proxy-validate', payload),
+  proxyCheckHistory: (params = {}) => call('proxy-check-history', clean(params)),
+  clearProxyCheckHistory: (proxyId) => call('proxy-check-history-clear', { proxy_id: proxyId }),
   importProxies: (text, defaultType = 'http') =>
     call('proxy-import', { text, default_type: defaultType }),
   exportProxies: (includeCredentials = true) =>
     call('proxy-export', { include_credentials: !!includeCredentials }),
+
+  templates: (params = {}) => call('template-list', clean({ page: 1, limit: 20, ...params })),
+  saveTemplate: (profileId, name, profileIds) =>
+    call(
+      'template-save',
+      clean({
+        profile_id: profileId,
+        name,
+        ...(profileIds && profileIds.length ? { profile_ids: profileIds } : {}),
+      })
+    ),
+  deleteTemplate: (id) => call('template-delete', { id }),
+  createProfileFromTemplate: (id, name) => call('template-create-profile', { id, name }),
 
   extensions: (params = {}) => call('extension-list', clean({ page: 1, limit: 10, ...params })),
   uploadExtension: (payload) => call('extension-upload', payload),

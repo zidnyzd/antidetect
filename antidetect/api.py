@@ -19,6 +19,7 @@ from . import (
     proxycheck,
     proxytext,
     store,
+    templates,
 )
 
 ACTIONS = {}
@@ -912,10 +913,36 @@ def tag_delete(params):
     return True
 
 
+def _check_to_dict(row):
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "proxy_id": row["proxy_id"],
+        "checked_at": row["checked_at"],
+        "ok": bool(row["ok"]),
+        "ip": row["ip"],
+        "latency_ms": row["latency_ms"],
+        "error": row["error"],
+    }
+
+
 @action("proxy-list")
 def proxy_list(params):
+    page = int(params.get("page") or 1)
+    limit = int(params.get("limit") or 10)
     with store.db() as conn:
-        return _paginated(conn, "proxies", params.get("page") or 1, params.get("limit") or 10)
+        total = conn.execute("SELECT COUNT(*) AS c FROM proxies").fetchone()["c"]
+        rows = conn.execute(
+            "SELECT * FROM proxies ORDER BY id LIMIT ? OFFSET ?",
+            (int(limit), (int(page) - 1) * int(limit)),
+        ).fetchall()
+        data = []
+        for row in rows:
+            item = dict(row)
+            item["last_check"] = _check_to_dict(store.latest_proxy_check(conn, row["id"]))
+            data.append(item)
+    return {"total": total, "data": data}
 
 
 @action("proxy-import")
@@ -938,8 +965,44 @@ def proxy_export(params):
     return result
 
 
+def _wants_validation(params):
+    value = params.get("validate")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
+def _validate_check(params):
+    """Cek proxy tanpa menyimpan dan tanpa menambah riwayat."""
+    return proxycheck.check_proxy(
+        {
+            "proxy_type": params.get("proxy_type"),
+            "proxy_ip": params.get("proxy_ip"),
+            "proxy_port": params.get("proxy_port"),
+            "proxy_user": params.get("proxy_user"),
+            "proxy_password": params.get("proxy_password"),
+        },
+        record_history=False,
+    )
+
+
+def _validate_proxy(data):
+    """Cek proxy sebelum simpan, gagal berarti jangan disimpan."""
+    result = _validate_check(data)
+    if not result.get("ok"):
+        reason = str(result.get("error") or "cek proxy gagal")
+        raise ApiError(1000, f"Proxy gagal diuji: {reason}")
+    return result
+
+
 @action("proxy-create")
 def proxy_create(params):
+    if _wants_validation(params):
+        _validate_proxy(params)
     with store.db() as conn:
         proxy_id = store.create_proxy(conn, params)
     _event("proxy-create", f'Proxy "{_event_name(_proxy_label(params))}" ditambahkan')
@@ -952,7 +1015,10 @@ def proxy_update(params):
     with store.db() as conn:
         row = conn.execute("SELECT * FROM proxies WHERE id = ?", (proxy_id,)).fetchone()
         merged = dict(row) if row else {"id": proxy_id}
-        merged.update({key: value for key, value in params.items() if value is not None})
+    merged.update({key: value for key, value in params.items() if value is not None})
+    if _wants_validation(params):
+        _validate_proxy(merged)
+    with store.db() as conn:
         fields, args = [], []
         for key in ("proxy_type", "proxy_ip", "proxy_port", "proxy_user",
                     "proxy_password", "note", "tag"):
@@ -982,6 +1048,112 @@ def proxy_delete(params):
 @action("proxy-check")
 def proxy_check(params):
     return proxycheck.check_proxy(params)
+
+
+@action("proxy-validate")
+def proxy_validate(params):
+    """Cek proxy tanpa menyimpan dan tanpa menambah riwayat."""
+    return _validate_check(params)
+
+
+@action("proxy-check-history")
+def proxy_check_history(params):
+    """Riwayat cek proxy. Tanpa proxy_id semua baris dikembalikan."""
+    try:
+        limit = int(params.get("limit") or 50)
+    except (TypeError, ValueError):
+        raise ApiError(1000, "limit harus berupa bilangan bulat")
+    proxy_id = params.get("proxy_id")
+    if proxy_id not in (None, ""):
+        try:
+            proxy_id = int(proxy_id)
+        except (TypeError, ValueError):
+            raise ApiError(1000, "proxy_id tidak valid")
+    with store.db() as conn:
+        total, rows = store.list_proxy_checks(conn, proxy_id, limit)
+        data = [_check_to_dict(row) for row in rows]
+    return {"total": total, "data": data}
+
+
+@action("proxy-check-history-clear")
+def proxy_check_history_clear(params):
+    proxy_id = params.get("proxy_id")
+    if proxy_id in (None, ""):
+        raise ApiError(1000, "proxy_id wajib diisi")
+    try:
+        proxy_id = int(proxy_id)
+    except (TypeError, ValueError):
+        raise ApiError(1000, "proxy_id tidak valid")
+    with store.db() as conn:
+        count = store.clear_proxy_checks(conn, proxy_id)
+    _event("proxy-check-history-clear", f"Riwayat cek proxy #{proxy_id} dihapus ({count} baris)")
+    return {"count": count}
+
+
+@action("template-list")
+def template_list(params):
+    try:
+        page = int(params.get("page") or 1)
+        limit = int(params.get("limit") or 10)
+    except (TypeError, ValueError):
+        raise ApiError(1000, "page dan limit harus berupa bilangan bulat")
+    with store.db() as conn:
+        return templates.list_templates(conn, page=page, limit=limit)
+
+
+@action("template-save")
+def template_save(params):
+    try:
+        with store.db() as conn:
+            result = templates.save_template(
+                conn,
+                params.get("profile_id"),
+                params.get("name"),
+                params.get("profile_ids"),
+            )
+    except templates.TemplateError as error:
+        raise ApiError(1000, str(error))
+    _event("template-save", f'Template "{_event_name(result["name"])}" disimpan')
+    return result
+
+
+@action("template-delete")
+def template_delete(params):
+    template_id = params.get("id")
+    if template_id in (None, ""):
+        raise ApiError(1000, "id template wajib diisi")
+    try:
+        with store.db() as conn:
+            result = templates.delete_template(conn, template_id)
+    except templates.TemplateError as error:
+        raise ApiError(1000, str(error))
+    _event("template-delete", f'Template "{_event_name(result["name"])}" dihapus')
+    return True
+
+
+@action("template-create-profile")
+def template_create_profile(params):
+    template_id = params.get("id")
+    if template_id in (None, ""):
+        raise ApiError(1000, "id template wajib diisi")
+    try:
+        with store.db() as conn:
+            _, snapshot = templates.template_snapshot(
+                conn, template_id, params.get("index") or 0
+            )
+            _check_kernel_path(snapshot)
+            _check_preferences(snapshot)
+            result = templates.create_profile_from_template(
+                conn, template_id, params.get("name"), params.get("index") or 0
+            )
+    except templates.TemplateError as error:
+        raise ApiError(1000, str(error))
+    _event(
+        "template-create-profile",
+        f'Profil "{_event_name(result["name"])}" dibuat dari template',
+        result["profile_id"],
+    )
+    return result
 
 
 @action("traffic-package-list")

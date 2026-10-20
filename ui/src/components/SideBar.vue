@@ -1,6 +1,6 @@
 <script setup>
 import { useRoute } from 'vue-router'
-import { Box, Connection, DataBoard, Delete, Link, Monitor, Setting, Tickets } from '@element-plus/icons-vue'
+import { Box, Connection, DataBoard, Delete, DocumentCopy, Link, Monitor, Setting, Tickets } from '@element-plus/icons-vue'
 
 defineProps({ collapsed: Boolean })
 
@@ -12,6 +12,7 @@ const browserItems = [
   { path: '/recycle', label: 'Keranjang Sampah', icon: Delete },
   { path: '/proxies', label: 'Proxy', icon: Connection },
   { path: '/extensions', label: 'Extension', icon: Box },
+  { path: '/templates', label: 'Template', icon: DocumentCopy },
 ]
 const systemItems = [
   { path: '/api-docs', label: 'API', icon: Link },
