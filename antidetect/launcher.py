@@ -27,6 +27,9 @@ KERNELS_DIR = DATA_DIR / "kernels"
 BUILTIN_KERNEL_ID = "builtin"
 PROFILES_DIR = DATA_DIR / "profiles"
 GOST_FALLBACK = Path.home() / ".local" / "bin" / "gost"
+# Launcher wajib melewati wrapper ini, yang menegakkan batas instance hidup,
+# batas laju peluncuran, dan lokasi user-data-dir.
+ENGINE_WRAPPER = Path.home() / ".local" / "bin" / "antidetect-engine-wrapper.py"
 
 GPU_FLAG_NAMES = {
     "gpu_vendor": "fingerprint-gpu-vendor",
@@ -634,7 +637,6 @@ def build_args(profile, port, app_args=None, proxy_arg=None, data_dir=None):
     ]
     if os.environ.get("ANTIDETECT_NO_SANDBOX") == "1":
         args.append("--no-sandbox")
-
     platform = _platform_arg(fp)
     if platform:
         args.append(f"--fingerprint-platform={platform}")
@@ -671,7 +673,23 @@ def build_args(profile, port, app_args=None, proxy_arg=None, data_dir=None):
         args.extend(str(a) for a in app_args)
     if profile.get("site_url"):
         args.append(profile["site_url"])
-    return args
+    return _wrap_engine_args(args, binary)
+
+
+def _wrap_engine_args(args, binary):
+    """Route the engine launch through the guard wrapper.
+
+    The wrapper refuses a launch when too many engine windows are alive, when
+    the launch rate is too high, or when the data directory sits outside the
+    allowed locations. Without it a probe script can flood the machine.
+    """
+    if os.environ.get("ANTIDETECT_ENGINE_GUARD") == "0":
+        return args
+    wrapper = Path(ENGINE_WRAPPER)
+    if not wrapper.is_file():
+        return args
+    engine_args = [arg for arg in args if arg != str(binary)]
+    return [str(wrapper), "--engine", str(binary), "--"] + engine_args
 
 
 def _state_path(profile_id):
