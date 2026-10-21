@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     site_id INTEGER,
     site_url TEXT,
     proxy_config TEXT,
+    proxy_key TEXT,
     fingerprint_config TEXT,
     preference_config TEXT,
     tag_ids TEXT DEFAULT '[]',
@@ -113,6 +114,8 @@ def init():
             conn.execute("ALTER TABLE profiles ADD COLUMN last_open_time INTEGER")
         if "deleted_at" not in columns:
             conn.execute("ALTER TABLE profiles ADD COLUMN deleted_at TEXT")
+        if "proxy_key" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN proxy_key TEXT")
         group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
         if "created_at" not in group_columns:
             conn.execute("ALTER TABLE groups ADD COLUMN created_at TEXT")
@@ -185,7 +188,8 @@ def profile_to_dict(row, include_seed=True):
         "site_id": row["site_id"],
         "site_url": row["site_url"],
         "proxy_config": proxy_config,
-        "proxy_key": proxy_key_for(proxy_config),
+        "proxy_key": row["proxy_key"] if "proxy_key" in row.keys() else None
+        or proxy_key_for(proxy_config),
         "fingerprint_config": _loads(row["fingerprint_config"]),
         "preference_config": _loads(row["preference_config"]),
         "tab_id": _load_list(row["tag_ids"]),
@@ -271,8 +275,9 @@ def create_profile(conn, data):
     cur = conn.execute(
         """INSERT INTO profiles
            (name, group_id, color, note, site_id, site_url,
-            proxy_config, fingerprint_config, preference_config, tag_ids, seed, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            proxy_config, proxy_key, fingerprint_config, preference_config,
+            tag_ids, seed, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             data.get("name") or "Profile",
             data.get("group_id") or 1,
@@ -281,6 +286,7 @@ def create_profile(conn, data):
             data.get("site_id") if data.get("site_id") is not None else 22,
             data.get("site_url"),
             json.dumps(data.get("proxy_config") or {}),
+            data.get("proxy_key"),
             json.dumps(data.get("fingerprint_config") or {}),
             json.dumps(data.get("preference_config") or {}),
             json.dumps(tag_ids),
@@ -303,6 +309,9 @@ def update_profile(conn, profile_id, data):
         if data.get(key) is not None:
             fields.append(f"{key} = ?")
             args.append(json.dumps(data[key]))
+    if "proxy_key" in data:
+        fields.append("proxy_key = ?")
+        args.append(data["proxy_key"])
     tag_source = next((key for key in ("tab_id", "tag_id", "tag_ids") if key in data), None)
     if tag_source:
         fields.append("tag_ids = ?")

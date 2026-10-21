@@ -2,6 +2,7 @@
 import json
 import mmap
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -796,30 +797,101 @@ def _multi_instance_enabled(profile):
     return _int_preference(preferences.get("multi_instance")) == 1
 
 
-def _instance_dirs(profile_id):
-    """Data directories a profile may use, one per running instance."""
-    base = PROFILES_DIR / str(profile_id)
-    return [base / "data"] + [base / f"data-{index}" for index in range(2, 20)]
+def _state_instances(state):
+    """Daftar instance yang tercatat di state.json profil."""
+    if not isinstance(state, dict):
+        return []
+    instances = state.get("instances")
+    if isinstance(instances, list):
+        return [item for item in instances if isinstance(item, dict)]
+    if state.get("pid"):
+        return [state]
+    return []
 
+def _instance_data_dir(profile_id, index):
+    """Direktori data instance ke-index.
 
-def _pick_instance_dir(profile):
-    """First data directory not already taken by a running instance."""
-    profile_id = profile["id"]
-    taken = {
-        entry["info"].get("data_dir")
-        for entry in _open.values()
-        if entry["info"].get("profile_id") == profile_id
-    }
-    for candidate in _instance_dirs(profile_id):
-        if str(candidate) in taken:
+    Instance pertama memakai 'data', instance berikutnya 'data-2', 'data-3'.
+    """
+    name = "data" if index <= 1 else f"data-{index}"
+    return PROFILES_DIR / str(profile_id) / name
+
+def _instance_dir_busy(path):
+    """True kalau direktori data sedang dipakai proses Chrome lain."""
+    lock = Path(path) / "SingletonLock"
+    target = ""
+    try:
+        target = os.readlink(lock)
+    except OSError:
+        try:
+            target = lock.read_text().strip()
+        except OSError:
+            return False
+    tail = target.rsplit("-", 1)[-1].strip()
+    if not tail.isdigit():
+        return True
+    return not _process_gone(None, int(tail))
+
+def _live_instance_indexes(profile_id):
+    """Nomor instance yang sedang dipakai proses hidup."""
+    indexes = set()
+    entry = _open.get(profile_id)
+    records = []
+    if entry:
+        records = [item["info"] for item in entry.get("instances") or []]
+    else:
+        records = _state_instances(_read_state(profile_id))
+    for info in records:
+        index = int(info.get("instance") or 1)
+        pid = int(info.get("pid") or 0)
+        if pid and not _process_gone(None, pid):
+            indexes.add(index)
+    return indexes
+
+def _free_instance_index(profile_id):
+    """Nomor instance berikutnya yang direktori datanya belum dipakai."""
+    busy = _live_instance_indexes(profile_id)
+    index = 1
+    while True:
+        if index not in busy and not _instance_dir_busy(_instance_data_dir(profile_id, index)):
+            return index
+        index += 1
+
+def _state_payload(profile_id):
+    """Isi state.json: instance utama di atas, daftar instance di bawah."""
+    entry = _open.get(profile_id)
+    if entry is None:
+        return {}
+    instances = [item["info"] for item in entry.get("instances") or []]
+    if not instances:
+        return dict(entry.get("info") or {})
+    payload = dict(instances[0])
+    payload["instances"] = instances
+    return payload
+
+def _screen_areas():
+    """Daftar area layar dari xrandr sebagai (x, y, lebar, tinggi)."""
+    try:
+        result = subprocess.run(
+            ["xrandr", "--query"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    areas = []
+    for line in (result.stdout or "").splitlines():
+        if " connected" not in line:
             continue
-        if candidate.exists() and any(candidate.iterdir()):
-            # Directory holds data from a previous run; a new instance needs a
-            # clean one, so only reuse it when nothing is running on it.
-            continue
-        return candidate
-    return PROFILES_DIR / str(profile_id) / "data"
-
+        found = re.search(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", line)
+        if found:
+            areas.append(
+                (
+                    int(found.group(3)),
+                    int(found.group(4)),
+                    int(found.group(1)),
+                    int(found.group(2)),
+                )
+            )
+    return areas
 
 def open_profile(profile, app_args=None):
     profile_id = profile["id"]
@@ -830,7 +902,8 @@ def open_profile(profile, app_args=None):
     gost_proc = None
     gost_port = None
     proxy_arg = None
-    data_dir = _pick_instance_dir(profile) if _multi_instance_enabled(profile) else None
+    instance_index = _free_instance_index(profile_id) if _multi_instance_enabled(profile) else 1
+    data_dir = _instance_data_dir(profile_id, instance_index) if _multi_instance_enabled(profile) else None
     try:
         if spec:
             if spec["user"] or spec["password"]:
@@ -869,6 +942,7 @@ def open_profile(profile, app_args=None):
         "proxy": proxy_arg,
         "gost_pid": gost_proc.pid if gost_proc else None,
         "data_dir": str(data_dir) if data_dir else str(PROFILES_DIR / str(profile_id) / "data"),
+        "instance": instance_index,
     }
     if _multi_instance_enabled(profile):
         # Several instances may run, so keep them all in a list per profile.
@@ -877,7 +951,7 @@ def open_profile(profile, app_args=None):
         _open[profile_id]["info"] = info
     else:
         _open[profile_id] = {"proc": proc, "info": info}
-    _write_state(profile_id, info)
+    _write_state(profile_id, _state_payload(profile_id))
     return info
 
 
