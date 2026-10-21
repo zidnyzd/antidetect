@@ -1,5 +1,6 @@
 """SQLite storage for profiles, groups, tags and proxies."""
 import datetime
+import hashlib
 import json
 import secrets
 import shutil
@@ -151,7 +152,30 @@ def _int_list(value):
     return result
 
 
+def proxy_key_for(proxy_config):
+    """MD5 of ip+port+user+password, as ixBrowser computes it.
+
+    Only a real proxy has a key; direct and traffic-package modes do not.
+    """
+    if not isinstance(proxy_config, dict):
+        return None
+    proxy_type = str(proxy_config.get("proxy_type") or "direct").strip().lower()
+    if proxy_type in ("", "direct", "none"):
+        return None
+    mode = proxy_config.get("proxy_mode")
+    if mode is not None and str(mode).strip() == "1":
+        return None
+    parts = [
+        str(proxy_config.get("proxy_ip") or ""),
+        str(proxy_config.get("proxy_port") or ""),
+        str(proxy_config.get("proxy_user") or ""),
+        str(proxy_config.get("proxy_password") or ""),
+    ]
+    return hashlib.md5("".join(parts).encode("utf-8")).hexdigest()
+
+
 def profile_to_dict(row, include_seed=True):
+    proxy_config = _loads(row["proxy_config"])
     data = {
         "profile_id": row["id"],
         "name": row["name"],
@@ -160,7 +184,8 @@ def profile_to_dict(row, include_seed=True):
         "note": row["note"],
         "site_id": row["site_id"],
         "site_url": row["site_url"],
-        "proxy_config": _loads(row["proxy_config"]),
+        "proxy_config": proxy_config,
+        "proxy_key": proxy_key_for(proxy_config),
         "fingerprint_config": _loads(row["fingerprint_config"]),
         "preference_config": _loads(row["preference_config"]),
         "tab_id": _load_list(row["tag_ids"]),

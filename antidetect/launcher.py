@@ -35,6 +35,10 @@ GPU_FLAG_NAMES = {
     "disable_spoofing": "disable-spoofing",
 }
 DISABLE_SPOOFING_VALUES = ("font", "audio", "canvas", "clientrects", "gpu")
+# Hanya dua dari lima nilai yang terukur mengubah apa pun di engine 150.
+# font, audio, dan clientrects diterima engine lalu diabaikan diam-diam.
+DISABLE_SPOOFING_EFFECTIVE = ("canvas", "gpu")
+WEBRTC_MODES = (0, 1, 2, 3, 4)
 
 _open = {}
 _flag_cache = {}
@@ -59,7 +63,24 @@ def flag_supported(name, binary=None):
 
 
 def kernel_support(binary=None):
-    return {key: flag_supported(name, binary) for key, name in GPU_FLAG_NAMES.items()}
+    support = {key: flag_supported(name, binary) for key, name in GPU_FLAG_NAMES.items()}
+    support["disable_spoofing_effective"] = list(DISABLE_SPOOFING_EFFECTIVE)
+    return support
+
+
+def max_kernel_version():
+    """Highest installed kernel number, as ixBrowser reports it."""
+    highest = 0
+    for kernel in available_kernels():
+        for part in str(kernel.get("version") or "").replace(".", " ").split():
+            if part.isdigit():
+                highest = max(highest, int(part))
+                break
+        for part in str(kernel.get("name") or "").split():
+            if part.isdigit():
+                highest = max(highest, int(part))
+                break
+    return highest
 
 
 _kernel_versions = {}
@@ -230,6 +251,32 @@ def validate_preferences(preferences):
         if raw not in (None, "") and not isinstance(raw, str):
             raise PreferenceError("argumen startup harus berupa teks")
         parse_startup_args(raw)
+    if "block_permission_requests" in preferences:
+        value = _int_preference(preferences.get("block_permission_requests"))
+        if value is not None and value not in (0, 1):
+            raise PreferenceError("block_permission_requests harus 0 atau 1")
+    if "multi_instance" in preferences:
+        value = _int_preference(preferences.get("multi_instance"))
+        if value is not None and value not in (0, 1):
+            raise PreferenceError("multi_instance harus 0 atau 1")
+    _apply_preference_conflicts(preferences)
+
+
+def _apply_preference_conflicts(preferences):
+    """Mirror the ixBrowser rules where one switch forces another off."""
+    if not isinstance(preferences, dict):
+        return preferences
+    multi = _int_preference(preferences.get("multi_instance"))
+    cookies = _int_preference(preferences.get("cookies_backup"))
+    if multi == 1:
+        preferences["cookies_backup"] = 0
+        preferences["is_tabs_cache"] = 0
+    elif cookies == 1:
+        preferences["multi_instance"] = 0
+    elif cookies == 0 and "cookies_backup" in preferences:
+        for key in ("indexed_db_backup", "local_storage_backup", "extension_data_backup"):
+            preferences[key] = 0
+    return preferences
 
 
 def _int_preference(value):
@@ -281,6 +328,79 @@ def parse_disable_spoofing(value):
     return [name for name in DISABLE_SPOOFING_VALUES if name in chosen]
 
 
+def effective_disable_spoofing(values):
+    """Only the components the engine actually honours.
+
+    font, audio and clientrects are accepted by the binary and then ignored.
+    """
+    if isinstance(values, str):
+        values = values.split(",")
+    chosen = {str(item).strip().lower() for item in (values or []) if str(item).strip()}
+    return [name for name in DISABLE_SPOOFING_EFFECTIVE if name in chosen]
+
+
+def validate_fingerprint(fingerprint):
+    """Check the fingerprint fields the engine can police."""
+    if fingerprint in (None, ""):
+        return
+    if not isinstance(fingerprint, dict):
+        raise PreferenceError("fingerprint_config harus berupa objek")
+    parse_disable_spoofing(fingerprint.get("disable_spoofing"))
+    webrtc = fingerprint.get("webrtc")
+    if webrtc not in (None, ""):
+        try:
+            value = int(webrtc)
+        except (TypeError, ValueError):
+            raise PreferenceError("webrtc harus berupa angka 0 sampai 4")
+        if value not in WEBRTC_MODES:
+            raise PreferenceError(
+                "webrtc harus salah satu dari " + ", ".join(str(m) for m in WEBRTC_MODES)
+            )
+
+
+def normalize_switch(value):
+    """Accept both the SDK (0/1) and the ixBrowser bundle (1/2) conventions.
+
+    Returns 1 for active and 0 for inactive.
+    """
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if value in (None, ""):
+        return 0
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return 1
+    return 0
+
+
+def normalize_use_system_proxy(value):
+    """Accept the bundle string form and the SDK integer form."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("disable", "disabled", "off", "no"):
+            return 3
+        if text in ("enable", "enabled", "on", "yes"):
+            return 2
+        if text in ("follow", "global", "default"):
+            return 1
+        return value
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return value
+    return number if number in (1, 2, 3) else value
+
+
+def normalize_proxy_extraction_method(value):
+    """Accept invalid, every_type and the bundle-only handle."""
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower()
+    return text if text in ("invalid", "every_type", "handle") else value
+
+
 def _preference_args(preferences):
     args = []
     if not isinstance(preferences, dict):
@@ -309,6 +429,8 @@ def _preference_args(preferences):
         pass
     if _flag_enabled(preferences.get("open_devtools")):
         args.append("--auto-open-devtools-for-tabs")
+    if _int_preference(preferences.get("block_permission_requests")) == 1:
+        args.append("--deny-permission-prompts")
     return args
 
 
@@ -331,6 +453,54 @@ def _platform_arg(fp):
     if value in ("macos", "mac", "mac os"):
         return "macos"
     return None  # android/ios not supported by the engine
+
+
+def _webrtc_args(fp):
+    """Map the ixBrowser WebRTC mode onto the switches the engine knows.
+
+    Mode 0 off, 1 replace the public IP with the proxy IP and mask the local
+    IP, 2 keep the real IP, 3 forward through Google, 4 disable UDP.
+
+    The engine has no single switch for this, so the closest real switches
+    are used. Mode 3 and 4 need a proxy extension that does not exist here,
+    so mode 3 falls back to the closest available behaviour and mode 4 adds
+    the non-proxied UDP block.
+    """
+    mode = fp.get("webrtc")
+    if mode in (None, ""):
+        return []
+    try:
+        mode = int(mode)
+    except (TypeError, ValueError):
+        return []
+    if mode not in WEBRTC_MODES:
+        return []
+
+    args = []
+    if mode == 0:
+        # WebRTC off: block the peer connection and hide local addresses.
+        args.append("--disable-webrtc-encryption")
+        args.append("--enable-webrtc-hide-local-ips-with-mdns")
+        args.append("--webrtc-ip-handling-policy=disable_non_proxied_udp")
+        return args
+    if mode == 1:
+        # Replace the public IP with the proxy IP and mask the local IP.
+        args.append("--webrtc-ip-handling-policy=default_public_interface_only")
+        args.append("--enable-webrtc-hide-local-ips-with-mdns")
+        return args
+    if mode == 2:
+        # Keep the real IP; nothing to add.
+        return args
+    if mode == 3:
+        # Google forwarding needs a proxy extension, so keep the real
+        # interfaces and let the proxy handle the public address.
+        args.append("--webrtc-ip-handling-policy=default_public_and_private_interfaces")
+        return args
+    if mode == 4:
+        # Disable UDP so non-proxied UDP traffic cannot leak.
+        args.append("--webrtc-ip-handling-policy=disable_non_proxied_udp")
+        return args
+    return args
 
 
 def _gpu_args(fp, binary=None):
@@ -443,10 +613,12 @@ def stop_proxy_bridge(proc):
         _kill_pgid(proc.pid, timeout=5.0)
 
 
-def build_args(profile, port, app_args=None, proxy_arg=None):
+def build_args(profile, port, app_args=None, proxy_arg=None, data_dir=None):
     fp = profile.get("fingerprint_config") or {}
     binary = kernel_for(profile)
-    data_dir = PROFILES_DIR / str(profile["id"]) / "data"
+    if data_dir is None:
+        data_dir = PROFILES_DIR / str(profile["id"]) / "data"
+    data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     args = [
@@ -480,6 +652,7 @@ def build_args(profile, port, app_args=None, proxy_arg=None):
     if fp.get("timezone"):
         args.append(f"--timezone={fp['timezone']}")
 
+    args.extend(_webrtc_args(fp))
     args.extend(_gpu_args(fp, binary))
 
     preferences = profile.get("preference_config") or {}
@@ -600,15 +773,46 @@ def _stop_gost(info):
         _kill_pgid(pid, timeout=5.0)
 
 
+def _multi_instance_enabled(profile):
+    preferences = profile.get("preference_config") or {}
+    return _int_preference(preferences.get("multi_instance")) == 1
+
+
+def _instance_dirs(profile_id):
+    """Data directories a profile may use, one per running instance."""
+    base = PROFILES_DIR / str(profile_id)
+    return [base / "data"] + [base / f"data-{index}" for index in range(2, 20)]
+
+
+def _pick_instance_dir(profile):
+    """First data directory not already taken by a running instance."""
+    profile_id = profile["id"]
+    taken = {
+        entry["info"].get("data_dir")
+        for entry in _open.values()
+        if entry["info"].get("profile_id") == profile_id
+    }
+    for candidate in _instance_dirs(profile_id):
+        if str(candidate) in taken:
+            continue
+        if candidate.exists() and any(candidate.iterdir()):
+            # Directory holds data from a previous run; a new instance needs a
+            # clean one, so only reuse it when nothing is running on it.
+            continue
+        return candidate
+    return PROFILES_DIR / str(profile_id) / "data"
+
+
 def open_profile(profile, app_args=None):
     profile_id = profile["id"]
-    if profile_id in _open:
+    if profile_id in _open and not _multi_instance_enabled(profile):
         return _open[profile_id]["info"]
 
     spec = _proxy_spec(profile)
     gost_proc = None
     gost_port = None
     proxy_arg = None
+    data_dir = _pick_instance_dir(profile) if _multi_instance_enabled(profile) else None
     try:
         if spec:
             if spec["user"] or spec["password"]:
@@ -619,7 +823,7 @@ def open_profile(profile, app_args=None):
                 proxy_arg = f"{spec['scheme']}://{spec['host']}:{spec['port']}"
 
         port = _free_port()
-        args = build_args(profile, port, app_args, proxy_arg=proxy_arg)
+        args = build_args(profile, port, app_args, proxy_arg=proxy_arg, data_dir=data_dir)
         log_path = PROFILES_DIR / str(profile_id) / "chrome.log"
         log = open(log_path, "ab")
         env = os.environ.copy()
@@ -646,8 +850,15 @@ def open_profile(profile, app_args=None):
         "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "proxy": proxy_arg,
         "gost_pid": gost_proc.pid if gost_proc else None,
+        "data_dir": str(data_dir) if data_dir else str(PROFILES_DIR / str(profile_id) / "data"),
     }
-    _open[profile_id] = {"proc": proc, "info": info}
+    if _multi_instance_enabled(profile):
+        # Several instances may run, so keep them all in a list per profile.
+        _open.setdefault(profile_id, {"proc": None, "info": info, "instances": []})
+        _open[profile_id]["instances"].append({"proc": proc, "info": info})
+        _open[profile_id]["info"] = info
+    else:
+        _open[profile_id] = {"proc": proc, "info": info}
     _write_state(profile_id, info)
     return info
 
@@ -657,6 +868,18 @@ def close_profile(profile_id):
     info = entry["info"] if entry else _read_state(profile_id)
     if not info:
         return False
+    instances = entry.get("instances") if entry else None
+    if instances:
+        closed = 0
+        for item in instances:
+            item_info = item["info"]
+            item_pid = int(item_info.get("pid") or 0)
+            if not _graceful_close(item_info.get("debugging_address"), proc=item["proc"], pid=item_pid) and item_pid:
+                _kill_pgid(item_pid)
+            _stop_gost(item_info)
+            closed += 1
+        _clear_state(profile_id)
+        return closed > 0
     proc = entry["proc"] if entry else None
     pid = int(info.get("pid") or 0)
     if not _graceful_close(info.get("debugging_address"), proc=proc, pid=pid) and pid:
@@ -720,8 +943,15 @@ def arrange_opened_profiles(params=None):
     spacing_v = _arrange_number(params, "profile_spacing_vertical", 8, 0)
     start_x = _arrange_number(params, "starting_position_x", 0)
     start_y = _arrange_number(params, "starting_position_y", 0)
-    deviation_x = _arrange_number(params, "profile_deviaton_x", 0)
-    deviation_y = _arrange_number(params, "profile_deviaton_y", 0)
+    # The bundle spells it profile_deviation_x; the earlier API used a typo.
+    deviation_x = _arrange_number(params, "profile_deviation_x", None)
+    if deviation_x is None:
+        deviation_x = _arrange_number(params, "profile_deviaton_x", 0)
+    deviation_y = _arrange_number(params, "profile_deviation_y", None)
+    if deviation_y is None:
+        deviation_y = _arrange_number(params, "profile_deviaton_y", 0)
+    layout = _arrange_number(params, "layout", 1)
+    adaptive = _arrange_number(params, "adaptive", 0)
 
     arranged = 0
     for index, info in enumerate(opened_profiles()):
@@ -732,8 +962,16 @@ def arrange_opened_profiles(params=None):
         if not window_ids:
             continue
         row, column = divmod(index, per_line)
-        x = start_x + column * (width + spacing_h + deviation_x)
-        y = start_y + row * (height + spacing_v + deviation_y)
+        if layout == 0:
+            # Stack: every window shares the same origin, offset by deviation.
+            x = start_x + index * deviation_x
+            y = start_y + index * deviation_y
+        else:
+            x = start_x + column * (width + spacing_h + deviation_x)
+            y = start_y + row * (height + spacing_v + deviation_y)
+        if adaptive == 1:
+            x = start_x
+            y = start_y
         for window_id in window_ids:
             if _move_window(window_id, x, y, width, height):
                 arranged += 1

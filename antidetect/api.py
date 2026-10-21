@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import shutil
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -93,6 +94,9 @@ def engine_info(params):
         "version": kernels[0]["version"],
         "kernels": kernels,
         "disable_spoofing_values": list(launcher.DISABLE_SPOOFING_VALUES),
+        "disable_spoofing_effective": list(launcher.DISABLE_SPOOFING_EFFECTIVE),
+        "webrtc_modes": list(launcher.WEBRTC_MODES),
+        "max_kernel_version": launcher.max_kernel_version(),
     }
 
 
@@ -125,9 +129,73 @@ def _check_fingerprint(data):
     if not isinstance(config, dict):
         return
     try:
-        launcher.parse_disable_spoofing(config.get("disable_spoofing"))
+        launcher.validate_fingerprint(config)
     except launcher.PreferenceError as error:
         raise ApiError(1000, str(error))
+
+
+def _validate_cookie_payload(value):
+    """ixBrowser rejects a cookie value that is not a JSON array (code 2006)."""
+    if value in (None, ""):
+        return
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            raise ApiError(2006, "Format cookie salah, harus berupa larik JSON")
+        if not isinstance(parsed, list):
+            raise ApiError(2006, "Format cookie salah, harus berupa larik JSON")
+        return
+    if not isinstance(value, list):
+        raise ApiError(2006, "Format cookie salah, harus berupa larik JSON")
+
+
+def _proxy_key(proxy_config):
+    """MD5 of ip+port+user+password, as ixBrowser computes it.
+
+    Only meaningful for a real proxy; direct and traffic-package modes have no
+    key.
+    """
+    return store.proxy_key_for(proxy_config)
+
+
+def _normalize_profile_payload(data):
+    """Normalise the fields whose value conventions differ between SDK and bundle."""
+    payload = dict(data)
+    preferences = payload.get("preference_config")
+    if isinstance(preferences, dict):
+        preferences = dict(preferences)
+        for key in (
+            "show_bookmarks_bar",
+            "auto_upload_bookmarks",
+            "cookies_backup",
+            "indexed_db_backup",
+            "local_storage_backup",
+            "extension_data_backup",
+            "is_cookies_cache",
+            "is_tabs_cache",
+            "multi_instance",
+            "block_permission_requests",
+        ):
+            if key in preferences:
+                preferences[key] = launcher.normalize_switch(preferences.get(key))
+        payload["preference_config"] = preferences
+    proxy = payload.get("proxy_config")
+    if isinstance(proxy, dict):
+        proxy = dict(proxy)
+        if "use_system_proxy" in proxy:
+            proxy["use_system_proxy"] = launcher.normalize_use_system_proxy(
+                proxy.get("use_system_proxy")
+            )
+        if "proxy_extraction_method" in proxy:
+            proxy["proxy_extraction_method"] = launcher.normalize_proxy_extraction_method(
+                proxy.get("proxy_extraction_method")
+            )
+        payload["proxy_config"] = proxy
+    key = _proxy_key(payload.get("proxy_config"))
+    if key:
+        payload["proxy_key"] = key
+    return payload
 
 
 @action("profile-reset-seed")
@@ -243,8 +311,10 @@ def profile_create(params):
     _check_kernel_path(params)
     _check_preferences(params)
     _check_fingerprint(params)
+    _validate_cookie_payload(params.get("cookie"))
+    payload = _normalize_profile_payload(params)
     with store.db() as conn:
-        pid = store.create_profile(conn, params)
+        pid = store.create_profile(conn, payload)
         name = _profile_name(conn, pid)
     _event("profile-create", f'Profil "{_event_name(name)}" dibuat', pid)
     return {"profile_id": pid, "new_profile_id": pid}
@@ -256,9 +326,10 @@ def profile_update(params):
     _check_kernel_path(params)
     _check_preferences(params)
     _check_fingerprint(params)
+    payload = _normalize_profile_payload(params)
     with store.db() as conn:
         _active_profile(conn, pid)
-        store.update_profile(conn, pid, params)
+        store.update_profile(conn, pid, payload)
         name = conn.execute("SELECT name FROM profiles WHERE id = ?", (pid,)).fetchone()["name"]
     _event("profile-update", f'Profil "{_event_name(name)}" diperbarui', pid)
     return True
@@ -606,6 +677,12 @@ def profile_opened_list_arrange_tile(params):
     return launcher.arrange_opened_profiles(params)
 
 
+@action("profile-opened-list-arrage-tile")
+def profile_opened_list_arrage_tile(params):
+    """Alias with the bundle's typo; both names must work."""
+    return launcher.arrange_opened_profiles(params)
+
+
 @action("native-client-profile-opened-list")
 def native_opened_list(params):
     return []
@@ -651,6 +728,7 @@ def profile_update_cookies(params):
     pid = _known_pid(params)
     if "cookie" not in params:
         raise ApiError(1000, "cookie is required")
+    _validate_cookie_payload(params.get("cookie"))
     with store.db() as conn:
         name = _profile_name(conn, pid)
     try:
@@ -749,8 +827,31 @@ def profile_clear_cache_ext(params):
 def empty_recycle_bin(params):
     with store.db() as conn:
         count = store.empty_recycle_bin(conn)
+        orphans = _delete_orphan_proxies(conn)
     _event("empty-recycle-bin", f"Keranjang sampah dikosongkan, {count} profil dihapus permanen")
-    return {"count": count}
+    if orphans:
+        _event("empty-recycle-bin", f"{orphans} proxy tanpa profil dihapus")
+    return {"count": count, "proxies": orphans}
+
+
+def _delete_orphan_proxies(conn):
+    """Remove custom proxies no profile references any more."""
+    rows = conn.execute("SELECT id, proxy_type, proxy_ip, proxy_port, proxy_user FROM proxies").fetchall()
+    removed = 0
+    for row in rows:
+        used = conn.execute(
+            "SELECT 1 FROM profiles WHERE deleted_at IS NULL AND "
+            "json_extract(proxy_config, '$.proxy_ip') = ? AND "
+            "json_extract(proxy_config, '$.proxy_port') = ? LIMIT 1",
+            (row["proxy_ip"], row["proxy_port"]),
+        ).fetchone()
+        if used:
+            continue
+        conn.execute("DELETE FROM proxies WHERE id = ?", (row["id"],))
+        removed += 1
+    if removed:
+        conn.commit()
+    return removed
 
 
 def _paginated(conn, table, page, limit):
@@ -1287,6 +1388,10 @@ def event_clear(params):
         return {"count": store.clear_events(conn)}
 
 
+MAX_CONCURRENT_REQUESTS = 64
+_busy = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "antidetect/0.1"
 
@@ -1309,17 +1414,36 @@ class Handler(BaseHTTPRequestHandler):
         if fn is None:
             self._json(200, {"error": {"code": 1001, "message": f"unknown action: {name}"}})
             return
+        if not _busy.acquire(blocking=False):
+            self._json(
+                200,
+                {"error": {"code": 1008, "message": "Server sibuk, coba lagi nanti."}},
+            )
+            return
         try:
             data = fn(params)
-            self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
         except ApiError as error:
             self._json(200, {"error": {"code": error.code, "message": error.message}})
+            return
         except Exception as error:
             self._json(200, {"error": {"code": 1000, "message": str(error)}})
+            return
+        finally:
+            _busy.release()
+        self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
 
     def do_GET(self):
         if self.path in ("/", "/health"):
             self._json(200, {"status": "ok", "open": len(launcher.opened_profiles())})
+            return
+        if self.path.startswith("/api/v2/"):
+            self._json(200, {"error": {"code": 1007, "message": "Gunakan metode POST."}})
+            return
+        self._json(404, {"error": {"code": 404, "message": "not found"}})
+
+    def do_HEAD(self):
+        if self.path.startswith("/api/v2/"):
+            self._json(200, {"error": {"code": 1007, "message": "Gunakan metode POST."}})
             return
         self._json(404, {"error": {"code": 404, "message": "not found"}})
 

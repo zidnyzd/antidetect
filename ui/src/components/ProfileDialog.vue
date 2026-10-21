@@ -100,6 +100,24 @@ const SPOOFING_OPTIONS = [
   { value: 'gpu', label: 'GPU' },
 ]
 const SPOOFING_VALUES = SPOOFING_OPTIONS.map((option) => option.value)
+// Engine 150 hanya benar-benar memakai dua dari lima komponen ini. Font,
+// audio, dan clientrects diterima engine lalu diabaikan diam-diam.
+const SPOOFING_EFFECTIVE = ['canvas', 'gpu']
+const WEBRTC_OPTIONS = [
+  { value: 0, label: 'Matikan', hint: 'WebRTC dimatikan, situs bisa mendeteksi WebRTC mati' },
+  {
+    value: 1,
+    label: 'Ganti IP dengan proxy',
+    hint: 'IP publik diganti IP proxy dan IP lokal disamarkan',
+  },
+  { value: 2, label: 'Pakai IP asli', hint: 'WebRTC memakai IP asli komputer ini' },
+  {
+    value: 3,
+    label: 'Forward Google',
+    hint: 'Butuh extension proxy khusus, engine ini memakai mode paling mendekati',
+  },
+  { value: 4, label: 'Matikan UDP', hint: 'UDP non-proxy diblokir supaya IP tidak bocor' },
+]
 const CUSTOM_SITE_ID = 22
 const ACCOUNT_PRESETS = [
   { key: 'Facebook', site_id: 1, site_url: 'https://www.facebook.com/' },
@@ -150,6 +168,7 @@ function emptyForm() {
     gpu_vendor: '',
     gpu_renderer: '',
     disable_spoofing: [],
+    webrtc: 2,
     timezone: 'Asia/Jakarta',
     language: 'id-ID',
     extension_ids: [],
@@ -158,6 +177,8 @@ function emptyForm() {
     window_x: null,
     window_y: null,
     open_devtools: false,
+    block_permission_requests: false,
+    multi_instance: false,
     startup_args: '',
   }
 }
@@ -176,6 +197,9 @@ const versionOptions = computed(() =>
   form.platform === 'Macos' ? MACOS_VERSIONS : WINDOWS_VERSIONS
 )
 const versionLabel = computed(() => (form.platform === 'Macos' ? 'Versi macOS' : 'Versi Windows'))
+const webrtcHint = computed(
+  () => WEBRTC_OPTIONS.find((option) => option.value === Number(form.webrtc))?.hint || ''
+)
 const savedProxyPlaceholder = computed(() =>
   savedProxies.value.length ? 'Manual / isi sendiri' : 'Belum ada proxy tersimpan'
 )
@@ -263,6 +287,8 @@ function fillFromProfile(profile) {
   const disabled = spoofingValues(fingerprint.disable_spoofing)
   if (fingerprint.disable_gpu_fingerprint && !disabled.includes('gpu')) disabled.push('gpu')
   form.disable_spoofing = SPOOFING_VALUES.filter((name) => disabled.includes(name))
+  const webrtc = Number(fingerprint.webrtc)
+  form.webrtc = WEBRTC_OPTIONS.some((option) => option.value === webrtc) ? webrtc : 2
   form.timezone = fingerprint.timezone || 'Asia/Jakarta'
   form.language = fingerprint.language || 'id-ID'
   const preference = profile.preference_config || {}
@@ -278,7 +304,13 @@ function fillFromProfile(profile) {
   const devtools = preference.open_devtools
   form.open_devtools =
     devtools === true || devtools === 1 || ['1', 'true'].includes(String(devtools).toLowerCase())
+  form.block_permission_requests = isPreferenceOn(preference.block_permission_requests)
+  form.multi_instance = isPreferenceOn(preference.multi_instance)
   form.startup_args = typeof preference.startup_args === 'string' ? preference.startup_args : ''
+}
+
+function isPreferenceOn(value) {
+  return value === true || value === 1 || ['1', 'true'].includes(String(value).toLowerCase())
 }
 
 function numericPreference(value) {
@@ -428,6 +460,7 @@ function fingerprintPayload() {
     gpu_renderer: form.gpu_renderer.trim() || null,
     disable_spoofing: disableSpoofing,
     disable_gpu_fingerprint: disableSpoofing.includes('gpu'),
+    webrtc: Number(form.webrtc),
     timezone: form.timezone,
     language: form.language,
   }
@@ -458,6 +491,8 @@ function preferencePayload() {
     else payload[key] = Number(value)
   }
   payload.open_devtools = !!form.open_devtools
+  payload.block_permission_requests = !!form.block_permission_requests
+  payload.multi_instance = !!form.multi_instance
   const startupArgs = form.startup_args.trim()
   if (startupArgs) payload.startup_args = startupArgs
   else delete payload.startup_args
@@ -826,6 +861,17 @@ async function testProxy() {
           <p class="engine-note">
             GPU vendor dan renderer dibuat otomatis dari seed fingerprint. Engine 150 tidak menerima nilai GPU manual.
           </p>
+          <el-form-item label="WebRTC">
+            <el-select v-model="form.webrtc" class="field-320">
+              <el-option
+                v-for="option in WEBRTC_OPTIONS"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+            <p class="form-hint">{{ webrtcHint }}</p>
+          </el-form-item>
           <el-form-item label="Matikan spoofing">
             <el-select
               v-model="form.disable_spoofing"
@@ -838,10 +884,28 @@ async function testProxy() {
                 :key="option.value"
                 :label="option.label"
                 :value="option.value"
-              />
+                :disabled="!SPOOFING_EFFECTIVE.includes(option.value)"
+              >
+                <span>{{ option.label }}</span>
+                <span v-if="!SPOOFING_EFFECTIVE.includes(option.value)" class="option-note">
+                  tidak berefek di engine 150
+                </span>
+              </el-option>
             </el-select>
           </el-form-item>
-          <p class="form-hint">GPU memakai GPU asli host; opsi lain memakai nilai asli host untuk komponen tersebut.</p>
+          <p class="form-hint">
+            Hanya Canvas dan GPU yang benar-benar memakai nilai asli host. Font, Audio, dan ClientRects
+            diterima engine lalu diabaikan.
+          </p>
+          <el-alert
+            v-if="form.disable_spoofing.includes('canvas')"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="form-alert"
+            title="Matikan Canvas membuat semua profil punya sidik jari canvas yang sama"
+            description="Engine hanya punya satu nilai canvas asli host, jadi profil dengan Canvas dimatikan akan terdeteksi sebagai browser yang sama. Biarkan aktif bila profil ini dipakai bersama profil lain."
+          />
           <el-form-item label="Zona Waktu">
             <el-select
               v-model="form.timezone"
@@ -969,6 +1033,22 @@ async function testProxy() {
               <el-switch v-model="form.open_devtools" />
               <span class="switch-label">Buka DevTools saat profil dibuka</span>
             </div>
+          </el-form-item>
+          <el-form-item label="Blokir Izin">
+            <div class="switch-cell">
+              <el-switch v-model="form.block_permission_requests" />
+              <span class="switch-label">Tolak permintaan izin browser (kamera, mikrofon, lokasi, notifikasi)</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="Multi Instance">
+            <div class="switch-cell">
+              <el-switch v-model="form.multi_instance" />
+              <span class="switch-label">Izinkan profil ini dibuka lebih dari satu kali sekaligus</span>
+            </div>
+            <p class="form-hint">
+              Setiap instance memakai folder data sendiri, jadi riwayat dan cookie tidak bercampur.
+              Mode ini tidak bisa dipakai bersama backup cookie.
+            </p>
           </el-form-item>
           <el-form-item label="Argumen Startup">
             <div class="startup-args">
