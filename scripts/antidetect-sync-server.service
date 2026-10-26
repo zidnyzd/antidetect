@@ -1,0 +1,20 @@
+[Unit]
+Description=Antidetect Sync Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=antidetect
+Group=antidetect
+WorkingDirectory=/opt/antidetect
+Environment=PYTHONUNBUFFERED=1
+Environment=ANTIDETECT_HOME=/var/lib/antidetect-sync
+ExecStart=/usr/bin/python3 -m antidetect sync-server run --host 127.0.0.1 --port 53210 --data-dir /var/lib/antidetect-sync
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

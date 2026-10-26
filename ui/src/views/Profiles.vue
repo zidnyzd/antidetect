@@ -415,33 +415,66 @@ async function openById(profileId, name) {
     opened.value = new Set([...opened.value, profileId])
     ElMessage.success(`Profil "${name}" dibuka`)
   } catch (error) {
-    ElMessage.error(`Gagal membuka: ${error.message}`)
+    if (error.code === 1009) {
+      ElMessage.warning(`Profil "${name}" terkunci oleh perangkat lain: ${error.message}`)
+      await loadProfiles()
+    } else {
+      ElMessage.error(`Gagal membuka: ${error.message}`)
+    }
   } finally {
     markBusy(profileId, false)
     await pollOpened()
   }
 }
 
-async function toggleOpen(profile) {
-  const wasOpen = isOpen(profile)
-  markBusy(profile.profile_id, true)
+async function toggleOpen(row) {
+  const wasOpen = isOpen(row)
+  let forceOpen = false
+  if (!wasOpen && row.sync_lease && !row.sync_lease.is_local) {
+    try {
+      await ElMessageBox.confirm(
+        'Profil ini sedang dibuka di perangkat ' + row.sync_lease.holder_device_name + '. Ambil alih kunci dan buka paksa di sini?',
+        'Konfirmasi Ambil Alih Kunci',
+        {
+          confirmButtonText: 'Ambil Alih',
+          cancelButtonText: 'Batal',
+          type: 'warning',
+        }
+      )
+      forceOpen = true
+    } catch {
+      return
+    }
+  }
+  markBusy(row.profile_id, true)
   try {
     if (wasOpen) {
-      await api.closeProfile(profile.profile_id)
+      await api.closeProfile(row.profile_id)
       const next = new Set(opened.value)
-      next.delete(profile.profile_id)
+      next.delete(row.profile_id)
       opened.value = next
-      ElMessage.success(`Profil "${profile.name}" ditutup`)
+      ElMessage.success(`Profil "${row.name}" ditutup`)
+      await loadProfiles()
     } else {
-      await api.openProfile(profile.profile_id)
-      markOpenedLocally(profile.profile_id)
-      opened.value = new Set([...opened.value, profile.profile_id])
-      ElMessage.success(`Profil "${profile.name}" dibuka`)
+      if (forceOpen) {
+        await api.openProfile(row.profile_id, { force: true })
+      } else {
+        await api.openProfile(row.profile_id)
+      }
+      markOpenedLocally(row.profile_id)
+      opened.value = new Set([...opened.value, row.profile_id])
+      ElMessage.success(`Profil "${row.name}" dibuka`)
+      await loadProfiles()
     }
   } catch (error) {
-    ElMessage.error(`${wasOpen ? 'Gagal menutup' : 'Gagal membuka'}: ${error.message}`)
+    if (!wasOpen && error.code === 1009) {
+      ElMessage.warning(`Profil "${row.name}" terkunci oleh perangkat lain: ${error.message}`)
+      await loadProfiles()
+    } else {
+      ElMessage.error(`${wasOpen ? 'Gagal menutup' : 'Gagal membuka'}: ${error.message}`)
+    }
   } finally {
-    markBusy(profile.profile_id, false)
+    markBusy(row.profile_id, false)
     await pollOpened()
   }
 }
@@ -1206,7 +1239,17 @@ useOnRefresh(() => refreshAll())
           sortable="custom"
         >
           <template #default="{ row }">
-            <button type="button" class="profile-name" :title="row.name" @click="openEdit(row)">{{ row.name }}</button>
+            <div class="profile-name-wrap">
+              <button type="button" class="profile-name" :title="row.name" @click="openEdit(row)">{{ row.name }}</button>
+              <el-tag
+                v-if="row.sync_lease && !row.sync_lease.is_local"
+                type="warning"
+                size="small"
+                class="lease-badge"
+              >
+                {{ `Dibuka di ${row.sync_lease.holder_device_name}` }}
+              </el-tag>
+            </div>
           </template>
         </el-table-column>
         <el-table-column
@@ -1257,9 +1300,17 @@ useOnRefresh(() => refreshAll())
             </div>
           </template>
         </el-table-column>
-        <el-table-column v-if="isColumnVisible('status')" label="Status" width="80">
+        <el-table-column v-if="isColumnVisible('status')" label="Status" width="110">
           <template #default="{ row }">
-            <span :class="['status-text', isOpen(row) ? 'is-open' : 'is-closed']">
+            <el-tag
+              v-if="!isOpen(row) && row.sync_lease && !row.sync_lease.is_local"
+              type="warning"
+              size="small"
+              class="lease-badge"
+            >
+              {{ `Dibuka di ${row.sync_lease.holder_device_name}` }}
+            </el-tag>
+            <span v-else :class="['status-text', isOpen(row) ? 'is-open' : 'is-closed']">
               <span :class="['status-dot', isOpen(row) ? 'ok' : 'idle']"></span>
               {{ isOpen(row) ? 'Terbuka' : 'Tertutup' }}
             </span>

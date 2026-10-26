@@ -557,6 +557,16 @@ def test_2_and_3_and_4():
         test_blob_retention_gc(
             home_a, server_dir, profile_uuid, pid_a_off
         )
+        test_phase4_api_actions(
+            home_a,
+            home_b,
+            server_dir,
+            server_url,
+            passphrase,
+            profile_uuid,
+            pid_a_off,
+            pid_b_off,
+        )
     finally:
         httpd2.shutdown()
         httpd2.server_close()
@@ -1333,11 +1343,137 @@ def test_blob_retention_gc(home_a, server_dir, profile_uuid, pid_a):
     )
 
 
+def test_phase4_api_actions(
+    home_a,
+    home_b,
+    server_dir,
+    server_url,
+    passphrase,
+    profile_uuid,
+    pid_a,
+    pid_b,
+):
+    print("=== Tes 7: Action API Lokal Fase 4 (sync-status, sync-configure, sync-trigger, sync-conflicts, profile-list) ===")
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _use_home(target_home):
+        prev_db = store.DB_PATH
+        prev_prof = launcher.PROFILES_DIR
+        store.DB_PATH = target_home / "antidetect.db"
+        launcher.PROFILES_DIR = target_home / "profiles"
+        try:
+            yield
+        finally:
+            store.DB_PATH = prev_db
+            launcher.PROFILES_DIR = prev_prof
+
+    # 1. Device A mengambil lease pada profile_uuid, lalu Device B melakukan sync-trigger agar local_leases terisi
+    with _use_home(home_a):
+        with store.db() as conn_a:
+            lease = sync_agent.acquire_lease(conn_a, profile_uuid)
+        plist_a = api.ACTIONS["profile-list"]({"page": 1, "limit": 50})
+        item_a = next(p for p in plist_a["data"] if p["uuid"] == profile_uuid)
+        assert item_a["sync_lease"] is not None
+        assert item_a["sync_lease"]["is_local"] is True
+        assert item_a["sync_lease"]["holder_device_name"] == "Laptop-A"
+
+    with _use_home(home_b):
+        trig_b = api.ACTIONS["sync-trigger"]({})
+        assert "pushed" in trig_b and "pulled" in trig_b
+        st_b = api.ACTIONS["sync-status"]({})
+        assert st_b["configured"] is True
+        assert any(
+            l["profile_uuid"] == profile_uuid and not l["is_local_holder"]
+            for l in st_b["active_leases"]
+        )
+        plist_b = api.ACTIONS["profile-list"]({"page": 1, "limit": 50})
+        item_b = next(p for p in plist_b["data"] if p["uuid"] == profile_uuid)
+        assert item_b["sync_lease"] is not None
+        assert item_b["sync_lease"]["is_local"] is False
+        assert item_b["sync_lease"]["holder_device_name"] == "Laptop-A"
+
+    # Lepas lease di Device A dan tarik di Device B -> sync_lease menjadi None
+    with _use_home(home_a):
+        with store.db() as conn_a:
+            sync_agent.release_lease(
+                conn_a, profile_uuid, lease_token=lease["lease_token"]
+            )
+        plist_a_after = api.ACTIONS["profile-list"]({"page": 1, "limit": 50})
+        item_a_after = next(p for p in plist_a_after["data"] if p["uuid"] == profile_uuid)
+        assert item_a_after["sync_lease"] is None
+
+    # 2. Uji sync-conflicts dan sync-conflict-resolve di Device A (dari konflik yang tercatat sebelumnya)
+    with _use_home(home_a):
+        st_a = api.ACTIONS["sync-status"]({})
+        assert st_a["conflict_count"] >= 1
+        conflicts_a = api.ACTIONS["sync-conflicts"]({})
+        assert len(conflicts_a) == st_a["conflict_count"]
+        first_conf = conflicts_a[0]
+        res_resolve = api.ACTIONS["sync-conflict-resolve"](
+            {
+                "conflict_id": first_conf["conflict_id"],
+                "resolution": "keep_local",
+            }
+        )
+        assert res_resolve["resolved"] is True
+        for rest_conf in conflicts_a[1:]:
+            api.ACTIONS["sync-conflict-resolve"](
+                {
+                    "conflict_id": rest_conf["conflict_id"],
+                    "resolution": "keep_server",
+                }
+            )
+        st_a_after = api.ACTIONS["sync-status"]({})
+        assert st_a_after["conflict_count"] == 0
+        assert st_a_after["outbox_count"] >= 1
+        trig_a = api.ACTIONS["sync-trigger"]({})
+        assert trig_a["pushed"] >= 1
+
+    # 3. Uji sync-configure pada Device C baru
+    home_c = WORK_DIR / "home_c"
+    home_c.mkdir(parents=True, exist_ok=True)
+    tok_c = sync_server.create_enrollment_token(
+        db_path=server_dir, label="Device-C", ttl_minutes=30
+    )
+    with _use_home(home_c):
+        store.init()
+        st_c_before = api.ACTIONS["sync-status"]({})
+        assert st_c_before["configured"] is False
+        cfg_c = api.ACTIONS["sync-configure"](
+            {
+                "server_url": server_url,
+                "enrollment_token": tok_c.token,
+                "device_name": "Laptop-C",
+                "passphrase": passphrase,
+            }
+        )
+        assert cfg_c["status"] == "configured"
+        assert cfg_c["device_id"]
+        st_c_after = api.ACTIONS["sync-status"]({})
+        assert st_c_after["configured"] is True
+        assert st_c_after["device_name"] == "Laptop-C"
+        plist_c = api.ACTIONS["profile-list"]({"page": 1, "limit": 50})
+        assert plist_c["total"] >= 1
+
+    print(
+        json.dumps(
+            {
+                "profile_list_remote_lease": item_b["sync_lease"],
+                "resolved_conflicts": len(conflicts_a),
+                "device_c_configured": cfg_c["device_id"],
+                "device_c_pulled_profiles": plist_c["total"],
+            },
+            indent=2,
+        )
+    )
+
+
 def main():
     try:
         test_1_legacy_migration()
         test_2_and_3_and_4()
-        print("ALL SYNC PHASE 1, PHASE 2 & PHASE 3 TESTS PASSED")
+        print("ALL SYNC PHASE 1, PHASE 2, PHASE 3 & PHASE 4 TESTS PASSED")
     finally:
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 

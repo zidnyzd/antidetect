@@ -1,0 +1,17 @@
+FROM python:3.14-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    ANTIDETECT_HOME=/data
+
+WORKDIR /app
+
+COPY antidetect/ /app/antidetect/
+
+RUN mkdir -p /data
+
+VOLUME ["/data"]
+
+EXPOSE 53210
+
+CMD ["python", "-m", "antidetect", "sync-server", "run", "--host", "0.0.0.0", "--port", "53210", "--data-dir", "/data"]

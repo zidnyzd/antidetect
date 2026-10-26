@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { Fold, Expand, Refresh } from '@element-plus/icons-vue'
 import SideBar from './components/SideBar.vue'
 import { api } from './api'
@@ -9,18 +10,63 @@ import { useRefreshSignal } from './refresh'
 const STORAGE_KEY = 'antidetect.sidebar.collapsed'
 
 const route = useRoute()
+const router = useRouter()
 const collapsed = ref(localStorage.getItem(STORAGE_KEY) === '1')
 const clock = ref('')
 const apiOk = ref(false)
 const spinning = ref(false)
+const syncStatus = ref(null)
+const syncSpinning = ref(false)
 const refreshTick = useRefreshSignal()
 
 const crumb = computed(() => route.meta.crumb || 'Ringkasan')
 const section = computed(() => route.meta.section || 'Profil Browser')
 const showSection = computed(() => section.value !== 'Dasbor')
 
+const isSyncConfigured = computed(() => Boolean(syncStatus.value && syncStatus.value.configured))
+const hasSyncAttention = computed(() =>
+  Boolean(
+    isSyncConfigured.value &&
+      (syncStatus.value.last_sync_error || Number(syncStatus.value.conflict_count || 0) > 0)
+  )
+)
+const outboxCount = computed(() => Number(syncStatus.value?.outbox_count || 0))
+
+const syncDotClass = computed(() => {
+  if (!isSyncConfigured.value) return 'idle'
+  if (hasSyncAttention.value) return 'bad'
+  if (outboxCount.value > 0) return 'warn'
+  return 'ok'
+})
+
+const syncLabel = computed(() => {
+  if (!isSyncConfigured.value) return 'Sync: Nonaktif'
+  if (hasSyncAttention.value) return 'Sync: Perhatian'
+  if (outboxCount.value > 0) return `Sync (${outboxCount.value})`
+  return 'Sync: Aktif'
+})
+
+const syncTooltip = computed(() => {
+  if (!isSyncConfigured.value) {
+    return 'Sinkronisasi belum dikonfigurasi. Klik untuk mengatur di Pengaturan.'
+  }
+  const devName = syncStatus.value?.device_name || 'Perangkat lokal'
+  const lastSync = syncStatus.value?.last_sync_at || 'Belum pernah'
+  if (hasSyncAttention.value) {
+    if (Number(syncStatus.value?.conflict_count || 0) > 0) {
+      return `Perangkat: ${devName} · ${syncStatus.value.conflict_count} konflik sinkronisasi perlu diselesaikan`
+    }
+    return `Perangkat: ${devName} · Error: ${syncStatus.value?.last_sync_error}`
+  }
+  if (outboxCount.value > 0) {
+    return `Perangkat: ${devName} · ${outboxCount.value} perubahan menunggu kirim · Terakhir sinkron: ${lastSync}`
+  }
+  return `Perangkat: ${devName} · Terakhir sinkron: ${lastSync}`
+})
+
 let clockTimer = null
 let healthTimer = null
+let syncTimer = null
 let spinTimer = null
 
 function toggleSidebar() {
@@ -47,6 +93,37 @@ async function checkHealth() {
   }
 }
 
+async function checkSyncStatus() {
+  try {
+    syncStatus.value = await api.syncStatus()
+  } catch {
+    // Biarkan state sebelumnya jika API sedang tidak terjangkau
+  }
+}
+
+function goToSyncSettings() {
+  router.push('/settings')
+}
+
+async function requestSync() {
+  if (!isSyncConfigured.value) {
+    router.push('/settings')
+    return
+  }
+  if (syncSpinning.value) return
+  syncSpinning.value = true
+  try {
+    await api.syncTrigger()
+    await checkSyncStatus()
+    refreshTick.value += 1
+  } catch (error) {
+    ElMessage.error(`Sinkronisasi gagal: ${error.message}`)
+    await checkSyncStatus()
+  } finally {
+    syncSpinning.value = false
+  }
+}
+
 function requestRefresh() {
   spinning.value = true
   clearTimeout(spinTimer)
@@ -56,16 +133,23 @@ function requestRefresh() {
   refreshTick.value += 1
 }
 
+watch(refreshTick, () => {
+  checkSyncStatus()
+})
+
 onMounted(() => {
   tickClock()
   clockTimer = setInterval(tickClock, 1000)
   checkHealth()
   healthTimer = setInterval(checkHealth, 5000)
+  checkSyncStatus()
+  syncTimer = setInterval(checkSyncStatus, 10000)
 })
 
 onUnmounted(() => {
   clearInterval(clockTimer)
   clearInterval(healthTimer)
+  clearInterval(syncTimer)
   clearTimeout(spinTimer)
 })
 </script>
@@ -90,6 +174,34 @@ onUnmounted(() => {
           <span class="crumb current">{{ crumb }}</span>
         </nav>
         <div class="topbar-right">
+          <div class="sync-topbar">
+            <el-tooltip :content="syncTooltip" placement="bottom" :show-after="200">
+              <button
+                type="button"
+                :class="['sync-badge', { 'is-inactive': !isSyncConfigured, 'is-warn': outboxCount > 0 && !hasSyncAttention, 'is-bad': hasSyncAttention }]"
+                @click="goToSyncSettings"
+              >
+                <span :class="['status-dot', syncDotClass]"></span>
+                <span>{{ syncLabel }}</span>
+              </button>
+            </el-tooltip>
+            <el-tooltip
+              v-if="isSyncConfigured"
+              content="Sinkronkan sekarang"
+              placement="bottom"
+              :show-after="200"
+            >
+              <button
+                type="button"
+                class="icon-button sync-now-button"
+                aria-label="Sinkronkan sekarang"
+                :disabled="syncSpinning"
+                @click="requestSync"
+              >
+                <el-icon :class="{ spinning: syncSpinning }"><Refresh /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
           <el-tooltip content="Server lokal 127.0.0.1:53200" placement="bottom" :show-after="200">
             <div class="api-state">
               <span :class="['status-dot', apiOk ? 'ok' : 'bad']"></span>

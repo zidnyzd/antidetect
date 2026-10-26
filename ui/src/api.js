@@ -18,7 +18,11 @@ async function call(action, params = {}) {
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const payload = await res.json()
-  if (payload.error && payload.error.code !== 0) throw new Error(payload.error.message)
+  if (payload.error && payload.error.code !== 0) {
+    const err = new Error(payload.error.message)
+    err.code = payload.error.code
+    throw err
+  }
   return payload.data
 }
 
@@ -32,7 +36,7 @@ export const api = {
   restoreProfile: (profileId) => call('profile-restore', { profile_id: profileId }),
   deletePermanent: (profileId) => call('profile-delete-permanent', { profile_id: profileId }),
   emptyRecycleBin: () => call('empty-recycle-bin'),
-  openProfile: (profileId) => call('profile-open', { profile_id: profileId }),
+  openProfile: (profileId, options = {}) => call('profile-open', { profile_id: profileId, ...options }),
   closeProfile: (profileId) => call('profile-close', { profile_id: profileId }),
   closeProfiles: (ids) => call('profile-close-in-batches', { profile_id: [...ids] }),
   openedList: () => call('profile-opened-list'),
@@ -106,6 +110,12 @@ export const api = {
   events: (params = {}) => call('event-list', clean({ page: 1, limit: 20, ...params })),
   exportEvents: (params = {}) => call('event-export', clean(params)),
   clearEvents: () => call('event-clear'),
+
+  syncStatus: () => call('sync-status'),
+  syncConfigure: (payload) => call('sync-configure', payload),
+  syncTrigger: () => call('sync-trigger'),
+  syncConflicts: () => call('sync-conflicts'),
+  syncConflictResolve: (payload) => call('sync-conflict-resolve', payload),
 
   health: async () => {
     const res = await fetch('/health')

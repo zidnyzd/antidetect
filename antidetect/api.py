@@ -312,9 +312,32 @@ def profile_list(params):
                 sort_by=params.get("sort_by") or "created",
                 sort_dir=params.get("sort_dir") or "desc",
             )
+            now_epoch = int(time.time())
+            leases_by_uuid = {}
+            try:
+                store._ensure_sync_schema(conn)
+                lease_rows = conn.execute(
+                    """SELECT profile_uuid, holder_device_name, is_local_holder, expires_at
+                       FROM local_leases
+                       WHERE expires_at > ?""",
+                    (now_epoch,),
+                ).fetchall()
+                for lrow in lease_rows:
+                    leases_by_uuid[lrow["profile_uuid"]] = {
+                        "holder_device_name": lrow["holder_device_name"] or "",
+                        "is_local": bool(lrow["is_local_holder"]),
+                        "expires_at": int(lrow["expires_at"]),
+                    }
+            except Exception:
+                pass
+            items = []
+            for r in rows:
+                item = store.profile_to_dict(r)
+                item["sync_lease"] = leases_by_uuid.get(item.get("uuid"))
+                items.append(item)
     except ValueError as error:
         raise ApiError(1000, str(error))
-    return {"total": total, "data": [store.profile_to_dict(r) for r in rows]}
+    return {"total": total, "data": items}
 
 
 LOG_KINDS = ("chrome", "gost")
@@ -1639,6 +1662,183 @@ def event_export(params):
 def event_clear(params):
     with store.db() as conn:
         return {"count": store.clear_events(conn)}
+
+
+@action("sync-status")
+def sync_status(params):
+    with store.db() as conn:
+        status = sync_agent.get_status(conn)
+        now_epoch = int(time.time())
+        lease_rows = conn.execute(
+            """SELECT profile_uuid, holder_device_id, holder_device_name,
+                      is_local_holder, expires_at
+               FROM local_leases
+               WHERE expires_at > ?
+               ORDER BY profile_uuid""",
+            (now_epoch,),
+        ).fetchall()
+        status["active_leases"] = [
+            {
+                "profile_uuid": row["profile_uuid"],
+                "holder_device_id": row["holder_device_id"],
+                "holder_device_name": row["holder_device_name"] or "",
+                "is_local_holder": bool(row["is_local_holder"]),
+                "is_local": bool(row["is_local_holder"]),
+                "expires_at": int(row["expires_at"]),
+            }
+            for row in lease_rows
+        ]
+        conflict_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM local_conflicts WHERE resolved = 0"
+        ).fetchone()["c"]
+        status["conflict_count"] = int(conflict_count)
+        return status
+
+
+@action("sync-configure")
+def sync_configure(params):
+    server_url = params.get("server_url")
+    enrollment_token = params.get("enrollment_token")
+    device_name = params.get("device_name")
+    passphrase = params.get("passphrase")
+    try:
+        reg = sync_agent.register_device(
+            server_url=server_url,
+            enrollment_token=enrollment_token,
+            device_name=device_name,
+            passphrase=passphrase,
+        )
+        with store.db() as conn:
+            cycle = sync_agent.sync_cycle(conn)
+    except sync_agent.SyncAgentError as error:
+        raise ApiError(int(error.code or 1000), str(error))
+    return {
+        "status": "configured",
+        "device_id": reg["device_id"],
+        "device_name": reg.get("device_name"),
+        "server_url": reg.get("server_url"),
+        "pushed": int(cycle.get("pushed") or 0),
+        "pulled": int(cycle.get("pulled") or 0),
+    }
+
+
+@action("sync-trigger")
+def sync_trigger(params):
+    try:
+        with store.db() as conn:
+            res = sync_agent.sync_cycle(conn)
+    except sync_agent.SyncAgentError as error:
+        raise ApiError(int(error.code or 1000), str(error))
+    return {
+        "pushed": int(res.get("pushed") or 0),
+        "pulled": int(res.get("pulled") or 0),
+        "last_pulled_seq": int(res.get("last_pulled_seq") or 0),
+    }
+
+
+def _conflict_entity_name(conn, entity_type, entity_uuid, losing_payload, winning_payload):
+    if entity_type in ("profile", "cookie_blob") and entity_uuid:
+        row = conn.execute(
+            "SELECT name FROM profiles WHERE uuid = ?", (entity_uuid,)
+        ).fetchone()
+        if row and row["name"]:
+            return row["name"]
+    elif entity_type == "group" and entity_uuid:
+        row = conn.execute(
+            "SELECT title FROM groups WHERE uuid = ?", (entity_uuid,)
+        ).fetchone()
+        if row and row["title"]:
+            return row["title"]
+    elif entity_type == "tag" and entity_uuid:
+        row = conn.execute(
+            "SELECT title FROM tags WHERE uuid = ?", (entity_uuid,)
+        ).fetchone()
+        if row and row["title"]:
+            return row["title"]
+    elif entity_type == "template" and entity_uuid:
+        row = conn.execute(
+            "SELECT name FROM templates WHERE uuid = ?", (entity_uuid,)
+        ).fetchone()
+        if row and row["name"]:
+            return row["name"]
+    for payload in (winning_payload, losing_payload):
+        if isinstance(payload, dict):
+            label = payload.get("name") or payload.get("title")
+            if label:
+                return str(label)
+    return entity_uuid or "-"
+
+
+@action("sync-conflicts")
+def sync_conflicts(params):
+    with store.db() as conn:
+        store._ensure_sync_schema(conn)
+        rows = conn.execute(
+            """SELECT conflict_id, entity_type, entity_uuid, reason,
+                      losing_payload, winning_payload, resolved, created_at
+               FROM local_conflicts
+               WHERE resolved = 0
+               ORDER BY created_at DESC"""
+        ).fetchall()
+        items = []
+        for row in rows:
+            losing_data = store._loads(row["losing_payload"])
+            winning_data = store._loads(row["winning_payload"])
+            items.append(
+                {
+                    "conflict_id": row["conflict_id"],
+                    "entity_type": row["entity_type"],
+                    "entity_uuid": row["entity_uuid"],
+                    "entity_name": _conflict_entity_name(
+                        conn,
+                        row["entity_type"],
+                        row["entity_uuid"],
+                        losing_data,
+                        winning_data,
+                    ),
+                    "reason": row["reason"],
+                    "losing_payload": losing_data,
+                    "winning_payload": winning_data,
+                    "resolved": bool(row["resolved"]),
+                    "created_at": row["created_at"],
+                }
+            )
+        return items
+
+
+@action("sync-conflict-resolve")
+def sync_conflict_resolve(params):
+    conflict_id = str(params.get("conflict_id") or "").strip()
+    if not conflict_id:
+        raise ApiError(1001, "conflict_id wajib diisi")
+    resolution = str(params.get("resolution") or "").strip()
+    if resolution not in ("keep_local", "keep_server"):
+        raise ApiError(1000, "resolution harus keep_local atau keep_server")
+    with store.db() as conn:
+        store._ensure_sync_schema(conn)
+        row = conn.execute(
+            "SELECT * FROM local_conflicts WHERE conflict_id = ?",
+            (conflict_id,),
+        ).fetchone()
+        if not row:
+            raise ApiError(1002, "konflik tidak ditemukan")
+        conn.execute(
+            "UPDATE local_conflicts SET resolved = 1 WHERE conflict_id = ?",
+            (conflict_id,),
+        )
+        if resolution == "keep_local":
+            entity_type = row["entity_type"]
+            entity_uuid = row["entity_uuid"]
+            target_type = "profile" if entity_type == "cookie_blob" else entity_type
+            table = sync_agent.ENTITY_TABLES.get(target_type)
+            if table and entity_uuid:
+                conn.execute(
+                    f"UPDATE {table} SET sync_dirty = 1 WHERE uuid = ?",
+                    (entity_uuid,),
+                )
+                store.enqueue_dirty_entities(conn)
+        conn.commit()
+    return {"resolved": True}
 
 
 MAX_CONCURRENT_REQUESTS = 64
