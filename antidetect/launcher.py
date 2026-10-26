@@ -818,13 +818,60 @@ def _clear_state(profile_id):
 def _process_gone(proc, pid):
     if proc is not None:
         return proc.poll() is not None
+    if not pid:
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
     except PermissionError:
         return False
+    try:
+        with open(f"/proc/{pid}/status", "r") as handle:
+            for line in handle:
+                if line.startswith("State:"):
+                    return "Z" in line
+    except OSError:
+        return True
     return False
+
+
+def _prune_entry(profile_id, entry):
+    instances = entry.get("instances")
+    if instances is not None:
+        alive = []
+        for item in instances:
+            proc = item.get("proc")
+            pid = int(item.get("info", {}).get("pid") or 0)
+            if not _process_gone(proc, pid):
+                alive.append(item)
+            else:
+                _stop_gost(item.get("info") or {})
+        if alive:
+            entry["instances"] = alive
+            entry["info"] = alive[0]["info"]
+            _write_state(profile_id, _state_payload(profile_id))
+            return True
+        else:
+            _open.pop(profile_id, None)
+            _clear_state(profile_id)
+            return False
+    else:
+        proc = entry.get("proc")
+        pid = int(entry.get("info", {}).get("pid") or 0)
+        if _process_gone(proc, pid):
+            _stop_gost(entry.get("info") or {})
+            _open.pop(profile_id, None)
+            _clear_state(profile_id)
+            return False
+        return True
+
+
+def _prune_all_dead():
+    for profile_id in list(_open.keys()):
+        entry = _open.get(profile_id)
+        if entry is not None:
+            _prune_entry(profile_id, entry)
 
 
 def _kill_pgid(pgid, timeout=8.0):
@@ -970,7 +1017,7 @@ def _state_payload(profile_id):
 
 def open_profile(profile, app_args=None):
     profile_id = profile["id"]
-    if profile_id in _open and not _multi_instance_enabled(profile):
+    if is_open(profile_id) and not _multi_instance_enabled(profile):
         return _open[profile_id]["info"]
 
     spec = _proxy_spec(profile)
@@ -1060,6 +1107,7 @@ def close_profile(profile_id):
 
 
 def opened_profiles():
+    _prune_all_dead()
     return [entry["info"] for entry in _open.values()]
 
 
@@ -1195,7 +1243,10 @@ def arrange_opened_profiles(params=None):
 
 
 def is_open(profile_id):
-    return profile_id in _open
+    entry = _open.get(profile_id)
+    if not entry:
+        return False
+    return _prune_entry(profile_id, entry)
 
 
 def forget(profile_id):
