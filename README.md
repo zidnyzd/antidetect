@@ -175,6 +175,16 @@ profil membuka dialog untuk memilih ZIP cookie wajib dan ZIP metadata opsional
 duplikat dan nama yang sudah ada, lalu mengimpor profil dan cookie dengan opsi
 memperbarui cookie pada profil yang namanya sudah ada.
 
+## Password manager
+
+Profil baru mengaktifkan `credentials_enable_service`, sehingga Chromium
+menawarkan simpan password setelah login manual. Password tidak ikut terimpor
+dari ixBrowser karena arsip ekspornya hanya berisi cookie dan metadata, bukan
+database `Login Data`. Password lama harus dimasukkan ulang sekali.
+
+Penyimpanan memakai `--password-store=basic`, jadi kredensial tersimpan lokal
+di direktori profil, bukan di keyring sistem dan bukan di cloud.
+
 ## Riwayat cek proxy
 
 Setiap proxy yang diuji lewat tombol Tes di halaman Proxy, atau lewat action

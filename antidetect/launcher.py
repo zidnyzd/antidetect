@@ -681,6 +681,38 @@ def stop_proxy_bridge(proc):
         _kill_pgid(proc.pid, timeout=5.0)
 
 
+def ensure_password_manager(data_dir):
+    """Aktifkan tawaran simpan password saat profil pertama kali disiapkan.
+
+    Build ungoogled-chromium membawa nilai awal nonaktif, sehingga bubble
+    simpan password tidak pernah muncul. Nilai yang sudah ada tidak diubah
+    supaya pilihan pengguna tetap dihormati.
+    """
+    default_dir = Path(data_dir) / "Default"
+    default_dir.mkdir(parents=True, exist_ok=True)
+    path = default_dir / "Preferences"
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+    if "credentials_enable_service" in data:
+        return
+    data["credentials_enable_service"] = True
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def build_args(profile, port, app_args=None, proxy_arg=None, data_dir=None):
     fp = profile.get("fingerprint_config") or {}
     validate_fingerprint(fp)
@@ -689,6 +721,7 @@ def build_args(profile, port, app_args=None, proxy_arg=None, data_dir=None):
         data_dir = PROFILES_DIR / str(profile["id"]) / "data"
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
+    ensure_password_manager(data_dir)
 
     args = [
         str(binary),
