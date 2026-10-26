@@ -1275,22 +1275,24 @@ Skrip `scripts/test-sync.py` akan menjalankan 1 server sinkronisasi (`server_syn
 | 5 | **Kontensi Lock SQLite Lokal Saat Sync Berjalan Bersamaan dengan Operasi UI/SDK**: `sync_agent.py` menulis hasil `pull` di latar belakang saat pengguna sedang mengklik tombol di UI. | Error `sqlite3.OperationalError: database is locked`. | Sedang | Mengaktifkan `PRAGMA journal_mode = WAL` dan `PRAGMA busy_timeout = 5000` pada setiap koneksi di `store.connect()`, serta menjaga transaksi tulis di dalam `store.py` sesingkat mungkin (tanpa melakukan I/O jaringan di dalam blok transaksi `with store.db()`). |
 | 6 | **Kebocoran Kredensial atau Cookie di Log / Git**: Kesalahan pemformatan log saat debugging mencatat payload request/response. | Kebocoran sesi akun. | Rendah | Melarang pencatatan body request pada endpoint `/v1/sync/blob/*` dan menyensor field `cookie`, `ciphertext_base64`, `proxy_password`, serta `device_token` di seluruh logger lokal maupun server. |
 
-## 16. Keputusan Terbuka yang Masih Perlu Dijawab Pengguna
+## 16. Keputusan Desain yang Telah Disepakati Bersama Pengguna
 
-Sebelum implementasi kode dimulai pada Fase 1, keputusan berikut memerlukan konfirmasi dari pengguna:
+Sebelum implementasi kode dimulai pada Fase 1, keputusan arsitektur berikut telah dikonfirmasi dan disepakati bersama pengguna:
 
 1. **Kebijakan Buka Profil Saat Server Tidak Dapat Dihubungi (*Offline Open Policy*)**:
-   * *Pilihan A (Rekomendasi Default)*: **Allow with Warning**. Jika server mati atau laptop sedang tanpa internet/Tailscale, profil tetap boleh dibuka secara lokal agar pekerjaan tidak terhambat; saat kembali online, cookie hanya diunggah jika tidak ada device lain yang membuka profil itu selama periode offline.
-   * *Pilihan B*: **Strict Lease**. Profil wajib memperoleh lease dari server sebelum Chrome boleh diluncurkan; jika server tidak terjangkau, `profile-open` ditolak.
-2. **Perilaku Mode Multi-Instance (`preference_config.multi_instance == 1`)**:
-   * Saat ini `launcher.py` mengizinkan pembukaan beberapa jendela paralel untuk satu profil menggunakan folder `data`, `data-2`, `data-3`.
-   * *Pertanyaan*: Apakah sinkronisasi cookie hanya membaca dan menulis dari instance utama (`data`), sementara `data-2` dan seterusnya tetap dianggap sesi sementara lokal, ataukah fitur multi-instance ingin dinonaktifkan untuk profil yang disinkronkan? (Asumsi rencana saat ini: hanya direktori utama `data` yang disinkronkan).
-3. **Target Hosting dan Penyimpanan Blob untuk Server Sinkronisasi**:
-   * Apakah server akan dijalankan di VPS Linux pribadi milik pengguna dengan penyimpanan disk lokal (`LocalFilesystemBlobStore`) yang diakses lewat Tailscale, ataukah pengguna sudah memiliki bucket objek kompatibel S3 (seperti Cloudflare R2 / MinIO) yang ingin langsung dipakai sejak Fase 3?
-4. **Sinkronisasi Binary Extension (`~/.local/share/antidetect/extensions/`)**:
-   * Apakah daftar extension yang terpasang cukup disinkronkan pada Fase 5, ataukah pengguna sudah memakai extension kustom pada profil harian saat ini sehingga sinkronisasi paket `.zip`/`.crx` extension perlu ditarik maju ke Fase 3 bersama cookie?
-5. **Penanganan Sesi yang Sudah Ada di Beberapa Device Saat Ini**:
-   * Apakah saat ini hanya ada **satu** device utama yang memegang database `antidetect.db` terbaru (sehingga device kedua nanti mulai dari keadaan kosong dan tinggal melakukan `pull`), ataukah sudah ada dua device aktif yang masing-masing punya perubahan berbeda dan memerlukan perintah rekonsiliasi `sync link-existing`?
+   * **Keputusan: Allow with Warning (Buka Offline)**. Jika server mati atau laptop sedang tanpa internet, profil tetap boleh dibuka dan diedit secara lokal agar pekerjaan pengguna tidak terhenti. Seluruh mutasi metadata dan cookie disimpan ke antrean lokal `sync_outbox`, lalu otomatis dikirimkan ke server saat laptop kembali online.
+
+2. **Perilaku Mode Multi-Instance**:
+   * **Keputusan: Normal (Satu Profil = Satu Jendela)**. Sistem difokuskan pada mode normal: satu profil membuka satu jendela browser tunggal yang terikat pada direktori `data` utama. Tidak ada percabangan multi-instance (`data-2`, `data-3`) pada profil yang disinkronkan, sehingga cookie sesi selalu konsisten dan tidak saling menimpa.
+
+3. **Target Hosting dan Penyimpanan Server**:
+   * **Keputusan: VPS Linux Mandiri dengan Domain Publik dan HTTPS**. Server sinkronisasi dijalankan di VPS milik pengguna dengan IP publik atau subdomain resmi berbalut HTTPS (reverse proxy Nginx atau Caddy). Penyimpanan blob cookie menggunakan disk lokal VPS (`LocalFilesystemBlobStore`) dan database SQLite WAL, sehingga mandiri tanpa perlu langganan cloud storage pihak ketiga seperti AWS S3 atau Cloudflare R2.
+
+4. **Alur Autentikasi dan Penghubungan Perangkat**:
+   * **Keputusan: Hubungkan Sekali (*One-Time Enrollment*), Tanpa Login Berulang**. Pengguna tidak perlu login dengan username dan password setiap kali membuka antidetect. Perangkat dihubungkan sekali saja lewat menu Pengaturan UI (memasukkan URL server, token pendaftaran dari server, nama perangkat, dan frasa sandi enkripsi). Setelah terhubung, sinkronisasi berjalan otomatis di latar belakang dengan indikator status di topbar.
+
+5. **Kondisi Data Awal Saat Ini**:
+   * **Keputusan: Kondisi A (Laptop Utama Sebagai Sumber Tunggal / *Primary Seed*)**. Seluruh 206 profil aktif (termasuk 200 profil hasil impor arsip ixBrowser) saat ini hanya berada di laptop utama ini. Laptop ini bertindak sebagai sumber data awal yang mengunggah metadata dan cookie ke server. Perangkat kedua nantinya mulai dari kondisi kosong dan langsung mengunduh (*pull*) seluruh data dari server secara bersih tanpa risiko bentrokan ID atau profil beririsan.
 
 ## 17. Perkiraan Usaha dan Urutan Pengerjaan
 
