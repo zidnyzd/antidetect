@@ -4,7 +4,7 @@ import json
 import sys
 from urllib.parse import urlparse
 
-from . import api, launcher, store
+from . import api, launcher, store, sync_agent, sync_server
 
 
 def _fingerprint_config(args):
@@ -60,11 +60,73 @@ def main(argv=None):
     p_delete = sub.add_parser("delete", help="delete a profile")
     p_delete.add_argument("profile_id", type=int)
 
+    p_sync_srv = sub.add_parser("sync-server", help="run or manage the sync server")
+    srv_sub = p_sync_srv.add_subparsers(dest="srv_cmd", required=True)
+
+    p_srv_run = srv_sub.add_parser("run", help="run the sync server")
+    p_srv_run.add_argument("--host", default="127.0.0.1")
+    p_srv_run.add_argument("--port", type=int, default=53210)
+    p_srv_run.add_argument("--data-dir", default=None)
+
+    p_srv_token = srv_sub.add_parser("token", help="manage enrollment tokens")
+    tok_sub = p_srv_token.add_subparsers(dest="tok_cmd", required=True)
+    p_tok_create = tok_sub.add_parser("create", help="create an enrollment token")
+    p_tok_create.add_argument("--label", "--name", dest="label", default=None)
+    p_tok_create.add_argument("--ttl", type=int, default=60)
+    p_tok_create.add_argument("--data-dir", default=None)
+
+    p_sync = sub.add_parser("sync", help="configure or run device sync")
+    sync_sub = p_sync.add_subparsers(dest="sync_cmd", required=True)
+
+    for setup_cmd in ("setup", "init"):
+        p_sync_setup = sync_sub.add_parser(setup_cmd, help="register this device with a sync server")
+        p_sync_setup.add_argument("--server", required=True)
+        p_sync_setup.add_argument("--token", required=True)
+        p_sync_setup.add_argument("--name", default=None)
+        p_sync_setup.add_argument("--passphrase", required=True)
+
+    sync_sub.add_parser("status", help="show sync status")
+    sync_sub.add_parser("now", help="run one push+pull sync cycle")
+
     args = parser.parse_args(argv)
+
+    if args.cmd == "sync-server":
+        if args.srv_cmd == "run":
+            sync_server.serve(host=args.host, port=args.port, data_dir=args.data_dir)
+        elif args.srv_cmd == "token" and args.tok_cmd == "create":
+            tok = sync_server.create_enrollment_token(
+                db_path=args.data_dir, label=args.label, ttl_minutes=args.ttl
+            )
+            print(
+                json.dumps(
+                    {
+                        "token": tok.token,
+                        "label": tok.label,
+                        "expires_at": tok.expires_at,
+                    }
+                )
+            )
+        return
+
     store.init()
 
     if args.cmd == "serve":
         api.serve(args.host, args.port)
+    elif args.cmd == "sync":
+        if args.sync_cmd in ("setup", "init"):
+            res = sync_agent.register_device(
+                server_url=args.server,
+                enrollment_token=args.token,
+                device_name=args.name,
+                passphrase=args.passphrase,
+            )
+            print(json.dumps(res))
+        elif args.sync_cmd == "status":
+            print(json.dumps(sync_agent.get_status()))
+        elif args.sync_cmd == "now":
+            with store.db() as conn:
+                res = sync_agent.sync_cycle(conn)
+            print(json.dumps(res))
     elif args.cmd == "create":
         with store.db() as conn:
             pid = store.create_profile(

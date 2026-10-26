@@ -1079,7 +1079,7 @@ def _delete_orphan_proxies(conn):
         ).fetchone()
         if used:
             continue
-        conn.execute("DELETE FROM proxies WHERE id = ?", (row["id"],))
+        store.delete_proxy(conn, row["id"])
         removed += 1
     if removed:
         conn.commit()
@@ -1134,12 +1134,7 @@ def group_create(params):
         ).fetchone()
         if duplicate:
             raise ApiError(1102, "Nama grup sudah dipakai")
-        cur = conn.execute(
-            "INSERT INTO groups (title, sort, created_at) VALUES (?, ?, ?)",
-            (title, sort, store.now()),
-        )
-        conn.commit()
-        gid = cur.lastrowid
+        gid = store.create_group(conn, title, sort)
     _event("group-create", f'Grup "{_event_name(title)}" dibuat')
     return {"id": gid}
 
@@ -1151,29 +1146,24 @@ def group_update(params):
         raise ApiError(1103, "Grup tidak ditemukan")
     gid = int(gid)
     with store.db() as conn:
-        row = conn.execute("SELECT id FROM groups WHERE id = ?", (gid,)).fetchone()
+        row = conn.execute("SELECT id, title FROM groups WHERE id = ?", (gid,)).fetchone()
         if not row:
             raise ApiError(1103, "Grup tidak ditemukan")
 
-        fields, args = [], []
+        new_title = None
         if "title" in params:
-            title = str(params.get("title") or "").strip()
-            if not title:
+            new_title = str(params.get("title") or "").strip()
+            if not new_title:
                 raise ApiError(1101, "Nama grup wajib diisi")
             duplicate = conn.execute(
-                "SELECT 1 FROM groups WHERE lower(title) = lower(?) AND id <> ?", (title, gid)
+                "SELECT 1 FROM groups WHERE lower(title) = lower(?) AND id <> ?",
+                (new_title, gid),
             ).fetchone()
             if duplicate:
                 raise ApiError(1102, "Nama grup sudah dipakai")
-            fields.append("title = ?")
-            args.append(title)
-        if "sort" in params:
-            fields.append("sort = ?")
-            args.append(_sort_value(params))
-        if fields:
-            args.append(gid)
-            conn.execute(f"UPDATE groups SET {', '.join(fields)} WHERE id = ?", args)
-            conn.commit()
+        new_sort = _sort_value(params) if "sort" in params else None
+        if new_title is not None or new_sort is not None:
+            store.update_group(conn, gid, new_title, new_sort)
         title = conn.execute("SELECT title FROM groups WHERE id = ?", (gid,)).fetchone()["title"]
     _event("group-update", f'Grup "{_event_name(title)}" diperbarui')
     return True
@@ -1199,8 +1189,7 @@ def group_delete(params):
                 1105,
                 f"Grup masih berisi {count} profil (termasuk keranjang sampah), pindahkan dulu",
             )
-        conn.execute("DELETE FROM groups WHERE id = ?", (gid,))
-        conn.commit()
+        store.delete_group(conn, gid)
         title = row["title"]
     _event("group-delete", f'Grup "{_event_name(title)}" dihapus')
     return True
@@ -1216,9 +1205,7 @@ def tag_list(params):
 def tag_create(params):
     title = params.get("title") or "Tag"
     with store.db() as conn:
-        cur = conn.execute("INSERT INTO tags (title) VALUES (?)", (title,))
-        conn.commit()
-        tid = cur.lastrowid
+        tid = store.create_tag(conn, title)
     _event("tag-create", f'Tag "{_event_name(title)}" dibuat')
     return {"id": tid}
 
@@ -1228,8 +1215,7 @@ def tag_update(params):
     tid = int(params.get("id") or 0)
     title = params.get("title")
     with store.db() as conn:
-        conn.execute("UPDATE tags SET title = ? WHERE id = ?", (title, tid))
-        conn.commit()
+        store.update_tag(conn, tid, title)
     _event("tag-update", f'Tag "{_event_name(title)}" diperbarui')
     return True
 
@@ -1240,8 +1226,7 @@ def tag_delete(params):
     with store.db() as conn:
         row = conn.execute("SELECT title FROM tags WHERE id = ?", (tid,)).fetchone()
         title = row["title"] if row else f"#{tid}"
-        conn.execute("DELETE FROM tags WHERE id = ?", (tid,))
-        conn.commit()
+        store.delete_tag(conn, tid)
     _event("tag-delete", f'Tag "{_event_name(title)}" dihapus')
     return True
 
@@ -1352,16 +1337,7 @@ def proxy_update(params):
     if _wants_validation(params):
         _validate_proxy(merged)
     with store.db() as conn:
-        fields, args = [], []
-        for key in ("proxy_type", "proxy_ip", "proxy_port", "proxy_user",
-                    "proxy_password", "note", "tag"):
-            if params.get(key) is not None:
-                fields.append(f"{key} = ?")
-                args.append(params[key])
-        if fields:
-            args.append(proxy_id)
-            conn.execute(f"UPDATE proxies SET {', '.join(fields)} WHERE id = ?", args)
-            conn.commit()
+        store.update_proxy(conn, proxy_id, params)
     _event("proxy-update", f'Proxy "{_event_name(_proxy_label(merged))}" diperbarui')
     return True
 
@@ -1372,8 +1348,7 @@ def proxy_delete(params):
     with store.db() as conn:
         row = conn.execute("SELECT * FROM proxies WHERE id = ?", (proxy_id,)).fetchone()
         label = _proxy_label(dict(row)) if row else f"#{proxy_id}"
-        conn.execute("DELETE FROM proxies WHERE id = ?", (proxy_id,))
-        conn.commit()
+        store.delete_proxy(conn, proxy_id)
     _event("proxy-delete", f'Proxy "{_event_name(label)}" dihapus')
     return True
 
