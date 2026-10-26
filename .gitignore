@@ -7,3 +7,5 @@ ui/node_modules/
 ui/dist/
 # Ekspor ixBrowser berisi cookie sesi, jangan pernah masuk repo.
 /Export Profile*.zip
+# Index CodeGraph bersifat lokal, dibuat ulang dengan codegraph init.
+/.codegraph/
