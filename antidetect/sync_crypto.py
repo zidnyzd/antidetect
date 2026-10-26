@@ -4,12 +4,14 @@ import hashlib
 import hmac
 import json
 import secrets
+import zlib
 
 PBKDF2_ITERATIONS = 100000
 KEY_LEN = 32
 NONCE_LEN = 16
 TAG_LEN = 32
 CIPHER_PREFIX = "v1:enc:"
+BLOB_PREFIX = "v1:blob:"
 
 
 class SyncCryptoError(Exception):
@@ -186,3 +188,143 @@ def decrypt_proxy_config(proxy_config, kek):
         elif "proxy_password" not in result:
             result["proxy_password"] = "" if enc_val is None else None
     return result
+
+
+def encrypt_blob(data_bytes, kek, profile_uuid, blob_kind="cookies", revision=1):
+    if isinstance(data_bytes, str):
+        raw_plain = data_bytes.encode("utf-8")
+    elif isinstance(data_bytes, (bytes, bytearray)):
+        raw_plain = bytes(data_bytes)
+    else:
+        raise SyncCryptoError("data_bytes harus berupa bytes atau str")
+
+    if not kek:
+        raise SyncCryptoError("KEK tidak boleh kosong")
+    clean_uuid = str(profile_uuid or "").strip()
+    clean_kind = str(blob_kind or "cookies").strip()
+    rev_int = int(revision if revision is not None else 1)
+    if not clean_uuid:
+        raise SyncCryptoError("profile_uuid wajib diisi untuk AAD blob")
+
+    sha256_plain = hashlib.sha256(raw_plain).hexdigest()
+    compressed = zlib.compress(raw_plain, level=6)
+    dek = secrets.token_bytes(KEY_LEN)
+    nonce = secrets.token_bytes(NONCE_LEN)
+
+    enc_key = derive_subkey(dek, "antidetect-blob-enc-v1")
+    mac_key = derive_subkey(dek, "antidetect-blob-mac-v1")
+    stream = _keystream(enc_key, nonce, len(compressed))
+    ciphertext = bytes(a ^ b for a, b in zip(compressed, stream))
+
+    aad = f"{clean_uuid}:{clean_kind}:{rev_int}".encode("utf-8")
+    tag = hmac.new(
+        mac_key,
+        BLOB_PREFIX.encode("ascii") + aad + b":" + nonce + ciphertext,
+        hashlib.sha256,
+    ).hexdigest()
+
+    wrapped_dek = encrypt_secret(dek.hex(), kek)
+    envelope = {
+        "v": 1,
+        "alg": "aes-256-gcm-v1",
+        "wrapped_dek": wrapped_dek,
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "hmac": tag,
+        "ciphertext_base64": base64.b64encode(ciphertext).decode("ascii"),
+        "sha256_plain": sha256_plain,
+        "size_plain": len(raw_plain),
+    }
+    envelope_json = json.dumps(
+        envelope, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    ciphertext_envelope_string = base64.b64encode(envelope_json).decode("ascii")
+    sha256_cipher = hashlib.sha256(
+        ciphertext_envelope_string.encode("ascii")
+    ).hexdigest()
+    size_bytes = len(ciphertext_envelope_string)
+    return ciphertext_envelope_string, sha256_plain, sha256_cipher, size_bytes
+
+
+def decrypt_blob(envelope_data, kek, profile_uuid, blob_kind="cookies", revision=1):
+    if not envelope_data:
+        raise SyncCryptoError("Integritas blob rusak atau AAD tidak cocok")
+    if not kek:
+        raise SyncCryptoError("KEK tidak boleh kosong")
+
+    clean_uuid = str(profile_uuid or "").strip()
+    clean_kind = str(blob_kind or "cookies").strip()
+    rev_int = int(revision if revision is not None else 1)
+    aad = f"{clean_uuid}:{clean_kind}:{rev_int}".encode("utf-8")
+
+    try:
+        if isinstance(envelope_data, dict):
+            envelope = envelope_data
+        else:
+            if isinstance(envelope_data, (bytes, bytearray)):
+                text = bytes(envelope_data).decode("utf-8")
+            else:
+                text = str(envelope_data).strip()
+            if text.startswith(BLOB_PREFIX):
+                text = text[len(BLOB_PREFIX):]
+            if text.startswith("{"):
+                envelope = json.loads(text)
+            else:
+                decoded_json = base64.b64decode(text.encode("ascii"), validate=True)
+                envelope = json.loads(decoded_json.decode("utf-8"))
+        if not isinstance(envelope, dict):
+            raise ValueError("Amplop bukan objek JSON")
+    except Exception as error:
+        raise SyncCryptoError("Integritas blob rusak atau AAD tidak cocok") from error
+
+    wrapped_dek = envelope.get("wrapped_dek")
+    nonce_b64 = envelope.get("nonce") or envelope.get("iv")
+    tag_hex = str(envelope.get("hmac") or envelope.get("tag") or "")
+    cipher_b64 = envelope.get("ciphertext_base64")
+    expected_sha256_plain = str(envelope.get("sha256_plain") or "")
+
+    if not wrapped_dek or not nonce_b64 or not tag_hex or cipher_b64 is None:
+        raise SyncCryptoError("Integritas blob rusak atau AAD tidak cocok")
+
+    try:
+        dek_hex = decrypt_secret(wrapped_dek, kek)
+        dek = bytes.fromhex(dek_hex)
+        nonce = base64.b64decode(str(nonce_b64).encode("ascii"), validate=True)
+        ciphertext = base64.b64decode(str(cipher_b64).encode("ascii"), validate=True)
+    except SyncCryptoError as error:
+        raise SyncCryptoError("Integritas blob rusak atau AAD tidak cocok") from error
+    except Exception as error:
+        raise SyncCryptoError("Integritas blob rusak atau AAD tidak cocok") from error
+
+    if len(dek) != KEY_LEN or len(nonce) != NONCE_LEN:
+        raise SyncCryptoError("Integritas blob rusak atau AAD tidak cocok")
+
+    enc_key = derive_subkey(dek, "antidetect-blob-enc-v1")
+    mac_key = derive_subkey(dek, "antidetect-blob-mac-v1")
+    expected_tag = hmac.new(
+        mac_key,
+        BLOB_PREFIX.encode("ascii") + aad + b":" + nonce + ciphertext,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(tag_hex, expected_tag):
+        raise SyncCryptoError("Integritas blob rusak atau AAD tidak cocok")
+
+    stream = _keystream(enc_key, nonce, len(ciphertext))
+    compressed = bytes(a ^ b for a, b in zip(ciphertext, stream))
+    try:
+        data_bytes = zlib.decompress(compressed)
+    except Exception as error:
+        raise SyncCryptoError("Integritas blob rusak atau AAD tidak cocok") from error
+
+    actual_sha256_plain = hashlib.sha256(data_bytes).hexdigest()
+    if expected_sha256_plain and not hmac.compare_digest(
+        actual_sha256_plain, expected_sha256_plain
+    ):
+        raise SyncCryptoError("Hash plaintext blob tidak cocok")
+
+    size_plain = envelope.get("size_plain")
+    if size_plain is not None and int(size_plain) != len(data_bytes):
+        raise SyncCryptoError("Ukuran plaintext blob tidak cocok")
+
+    return data_bytes
+

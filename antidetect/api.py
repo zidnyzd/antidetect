@@ -995,6 +995,24 @@ def profile_update_cookies(params):
         result = cookies.update_cookies(pid, params.get("cookie"))
     except cookies.CookieError as error:
         raise ApiError(1004, str(error))
+    try:
+        with store.db() as conn:
+            row = store.profile_get(conn, pid)
+            profile_uuid = row["uuid"] if row and "uuid" in row.keys() else None
+            resolved_url, resolved_token = sync_agent._try_resolve_endpoint(conn)
+            if profile_uuid and resolved_url and resolved_token:
+                cookies_json = cookies.get_cookies(pid)
+                cookie_list = json.loads(cookies_json) if cookies_json else []
+                l_row = conn.execute(
+                    "SELECT fencing_token FROM local_leases WHERE profile_uuid = ?",
+                    (profile_uuid,),
+                ).fetchone()
+                fencing_token = int(l_row["fencing_token"] or 0) if l_row else 0
+                sync_agent.upload_cookie_blob(
+                    conn, pid, profile_uuid, cookie_list, fencing_token
+                )
+    except Exception:
+        pass
     _event("profile-update-cookies", f'Cookie profil "{_event_name(name)}" diperbarui', pid)
     return result
 

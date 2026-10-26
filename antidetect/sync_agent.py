@@ -1,7 +1,9 @@
 """Agen sinkronisasi klien untuk antidetect (Push-Then-Pull)."""
+import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
 import socket
 import sys
 import threading
@@ -9,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import store, sync_crypto, sync_server
+from . import cookies, store, sync_crypto, sync_server
 
 _orig_server_authenticate = getattr(sync_server, "_authenticate", None)
 if callable(_orig_server_authenticate) and not getattr(
@@ -772,6 +774,316 @@ def release_lease(
         )
     except SyncAgentError:
         return {"released": True, "offline": True}
+
+
+def upload_cookie_blob(
+    conn,
+    profile_id,
+    profile_uuid,
+    cookies_list,
+    fencing_token=0,
+    server_url=None,
+    token=None,
+    kek=None,
+):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return upload_cookie_blob(
+                local_conn,
+                profile_id,
+                profile_uuid,
+                cookies_list,
+                fencing_token=fencing_token,
+                server_url=server_url,
+                token=token,
+                kek=kek,
+            )
+
+    store._ensure_sync_schema(conn)
+    if isinstance(cookies_list, str):
+        text = cookies_list.strip()
+        cookie_items = json.loads(text) if text else []
+    elif isinstance(cookies_list, list):
+        cookie_items = cookies_list
+    else:
+        cookie_items = cookies._cookie_list(cookies_list)
+
+    sha256_plain = cookies.cookie_digest(cookie_items)
+
+    prof_row = None
+    if profile_id is not None:
+        prof_row = conn.execute(
+            "SELECT * FROM profiles WHERE id = ?", (int(profile_id),)
+        ).fetchone()
+    if prof_row is None and profile_uuid:
+        prof_row = conn.execute(
+            "SELECT * FROM profiles WHERE uuid = ?", (str(profile_uuid).strip(),)
+        ).fetchone()
+    if prof_row is not None:
+        if profile_id is None:
+            profile_id = prof_row["id"]
+        if not profile_uuid:
+            profile_uuid = prof_row["uuid"]
+
+    clean_uuid = str(profile_uuid or "").strip()
+    if not clean_uuid:
+        raise SyncAgentError("profile_uuid wajib diisi", code=2003)
+
+    if (
+        prof_row is not None
+        and prof_row["cookie_sha256"] == sha256_plain
+        and prof_row["cookie_blob_id"]
+    ):
+        return {
+            "status": "skipped",
+            "blob_id": prof_row["cookie_blob_id"],
+            "profile_uuid": clean_uuid,
+            "cookie_revision": int(prof_row["cookie_revision"] or 0),
+            "sha256_plain": sha256_plain,
+        }
+
+    resolved_url, resolved_token = _resolve_endpoint(conn, server_url, token)
+
+    if kek is None:
+        kek, _ = store._load_local_crypto(conn)
+    if kek is None:
+        creds = load_credentials(conn=conn)
+        if creds.get("kek_hex"):
+            kek = bytes.fromhex(creds["kek_hex"])
+    if not kek:
+        raise SyncAgentError(
+            "Kunci enkripsi sinkronisasi (KEK) belum tersedia", code=2001
+        )
+
+    if fencing_token is None:
+        l_row = conn.execute(
+            "SELECT fencing_token FROM local_leases WHERE profile_uuid = ?",
+            (clean_uuid,),
+        ).fetchone()
+        fencing_token = int(l_row["fencing_token"] or 0) if l_row else 0
+    else:
+        fencing_token = int(fencing_token or 0)
+
+    json_bytes = json.dumps(
+        cookie_items, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    next_rev = (int(prof_row["cookie_revision"] or 0) if prof_row else 0) + 1
+
+    def _send_upload(rev_num):
+        cipher_env, _, sha256_cipher, size_bytes = sync_crypto.encrypt_blob(
+            json_bytes, kek, clean_uuid, "cookies", rev_num
+        )
+        return _post_json(
+            f"{resolved_url}/v1/sync/blob/upload",
+            {
+                "profile_uuid": clean_uuid,
+                "blob_kind": "cookies",
+                "fencing_token": fencing_token,
+                "revision": rev_num,
+                "encryption_scheme": "aes-256-gcm-v1",
+                "sha256_plain": sha256_plain,
+                "sha256_cipher": sha256_cipher,
+                "size_bytes": size_bytes,
+                "ciphertext_base64": cipher_env,
+            },
+            token=resolved_token,
+        )
+
+    try:
+        try:
+            resp = _send_upload(next_rev)
+        except SyncAgentError as retry_err:
+            if (
+                retry_err.code == 2007
+                and isinstance(retry_err.data, dict)
+                and retry_err.data.get("expected_revision")
+            ):
+                next_rev = int(retry_err.data["expected_revision"])
+                resp = _send_upload(next_rev)
+            else:
+                raise
+    except SyncAgentError as error:
+        if error.code == 2006 or error.http_status == 409:
+            conflict_id = f"conf_cookie_{secrets.token_hex(8)}"
+            ts_num = int(time.time())
+            db_dir = store._conn_db_path(conn).parent
+            pid_str = str(profile_id if profile_id is not None else "unknown")
+            backup_path = (
+                db_dir / "profiles" / pid_str / f"cookies-conflict-{ts_num}.json"
+            )
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            backup_payload = {
+                "profile_id": profile_id,
+                "profile_uuid": clean_uuid,
+                "fencing_token": fencing_token,
+                "sha256_plain": sha256_plain,
+                "created_at": store.now_utc(),
+                "cookies": cookie_items,
+            }
+            backup_text = json.dumps(backup_payload, ensure_ascii=False, indent=2)
+            backup_path.write_text(backup_text, encoding="utf-8")
+
+            from . import launcher
+
+            alt_backup = (
+                launcher.PROFILES_DIR / pid_str / f"cookies-conflict-{ts_num}.json"
+            )
+            if alt_backup != backup_path:
+                try:
+                    alt_backup.parent.mkdir(parents=True, exist_ok=True)
+                    alt_backup.write_text(backup_text, encoding="utf-8")
+                except OSError:
+                    pass
+
+            conn.execute(
+                """INSERT OR REPLACE INTO local_conflicts
+                   (conflict_id, entity_type, entity_uuid, reason,
+                    losing_payload, winning_payload, resolved, created_at)
+                   VALUES (?, 'cookie_blob', ?, 'STALE_FENCING_TOKEN', ?, ?, 0, ?)""",
+                (
+                    conflict_id,
+                    clean_uuid,
+                    json.dumps(backup_payload, ensure_ascii=False),
+                    json.dumps(error.data or {}, ensure_ascii=False),
+                    store.now_utc(),
+                ),
+            )
+            conn.commit()
+            return {
+                "status": "conflict",
+                "error": "STALE_FENCING_TOKEN",
+                "conflict_id": conflict_id,
+                "backup_path": str(backup_path),
+            }
+        raise
+
+    if profile_id is not None:
+        conn.execute(
+            """UPDATE profiles
+               SET cookie_blob_id = ?,
+                   cookie_revision = ?,
+                   cookie_sha256 = ?
+               WHERE id = ?""",
+            (
+                resp["blob_id"],
+                int(resp["cookie_revision"]),
+                sha256_plain,
+                int(profile_id),
+            ),
+        )
+    else:
+        conn.execute(
+            """UPDATE profiles
+               SET cookie_blob_id = ?,
+                   cookie_revision = ?,
+                   cookie_sha256 = ?
+               WHERE uuid = ?""",
+            (
+                resp["blob_id"],
+                int(resp["cookie_revision"]),
+                sha256_plain,
+                clean_uuid,
+            ),
+        )
+    conn.commit()
+    return resp
+
+
+def download_and_inject_cookies(
+    conn,
+    profile_id,
+    profile_uuid,
+    blob_id,
+    server_url=None,
+    token=None,
+    kek=None,
+):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return download_and_inject_cookies(
+                local_conn,
+                profile_id,
+                profile_uuid,
+                blob_id,
+                server_url=server_url,
+                token=token,
+                kek=kek,
+            )
+
+    store._ensure_sync_schema(conn)
+    clean_blob_id = str(blob_id or "").strip()
+    if not clean_blob_id:
+        raise SyncAgentError("blob_id wajib diisi", code=2003)
+
+    resolved_url, resolved_token = _resolve_endpoint(conn, server_url, token)
+    resp = _post_json(
+        f"{resolved_url}/v1/sync/blob/download",
+        {"blob_id": clean_blob_id},
+        token=resolved_token,
+    )
+
+    if kek is None:
+        kek, _ = store._load_local_crypto(conn)
+    if kek is None:
+        creds = load_credentials(conn=conn)
+        if creds.get("kek_hex"):
+            kek = bytes.fromhex(creds["kek_hex"])
+    if not kek:
+        raise SyncAgentError(
+            "Kunci enkripsi sinkronisasi (KEK) belum tersedia", code=2001
+        )
+
+    ciphertext_b64 = resp.get("ciphertext_base64") or ""
+    blob_kind = resp.get("blob_kind") or "cookies"
+    revision = int(resp.get("revision") or 1)
+    target_uuid = str(profile_uuid or resp.get("profile_uuid") or "").strip()
+
+    plain_bytes = sync_crypto.decrypt_blob(
+        ciphertext_b64, kek, target_uuid, blob_kind, revision
+    )
+    try:
+        cookie_list = json.loads(plain_bytes.decode("utf-8"))
+    except Exception as error:
+        raise sync_crypto.SyncCryptoError(
+            "Payload cookie hasil dekripsi bukan JSON valid"
+        ) from error
+
+    expected_sha256 = str(resp.get("sha256_plain") or "").strip()
+    computed_digest = cookies.cookie_digest(cookie_list)
+    raw_sha256 = hashlib.sha256(plain_bytes).hexdigest()
+    if expected_sha256 and expected_sha256 not in (computed_digest, raw_sha256):
+        raise sync_crypto.SyncCryptoError("Hash plaintext cookie tidak cocok")
+
+    from . import launcher, paths
+
+    conn_profiles_dir = store._conn_db_path(conn).parent / "profiles"
+    prev_profiles_dir = launcher.PROFILES_DIR
+    override_dir = prev_profiles_dir == paths.DATA_DIR / "profiles"
+    if override_dir:
+        launcher.PROFILES_DIR = conn_profiles_dir
+    try:
+        cookies.update_cookies(int(profile_id), cookie_list)
+    finally:
+        if override_dir:
+            launcher.PROFILES_DIR = prev_profiles_dir
+
+    conn.execute(
+        """UPDATE profiles
+           SET cookie_blob_id = ?,
+               cookie_revision = ?,
+               cookie_sha256 = ?
+           WHERE id = ?""",
+        (
+            clean_blob_id,
+            revision,
+            expected_sha256 or computed_digest,
+            int(profile_id),
+        ),
+    )
+    conn.commit()
+    return True
 
 
 _heartbeat_lock = threading.Lock()

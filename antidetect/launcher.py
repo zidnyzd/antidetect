@@ -854,6 +854,48 @@ def _release_profile_lease(profile_id, info=None):
         pass
 
 
+def _sync_cookies_after_close(profile_id, info=None):
+    from . import cookies
+
+    if not cookies.verify_cookie_db(profile_id):
+        return None
+    try:
+        cookies_json = cookies.get_cookies(profile_id)
+        cookie_list = json.loads(cookies_json) if cookies_json else []
+    except Exception:
+        return None
+
+    profile_uuid = (info or {}).get("uuid") if isinstance(info, dict) else None
+    fencing_token = (
+        (info or {}).get("fencing_token") if isinstance(info, dict) else None
+    )
+    try:
+        with store.db() as conn:
+            if not profile_uuid and profile_id is not None:
+                row = store.profile_get(conn, profile_id)
+                if row and "uuid" in row.keys():
+                    profile_uuid = row["uuid"]
+            if not fencing_token and profile_uuid:
+                l_row = conn.execute(
+                    "SELECT fencing_token FROM local_leases WHERE profile_uuid = ?",
+                    (profile_uuid,),
+                ).fetchone()
+                if l_row and l_row["fencing_token"]:
+                    fencing_token = int(l_row["fencing_token"])
+            resolved_url, resolved_token = sync_agent._try_resolve_endpoint(conn)
+            if profile_uuid and resolved_url and resolved_token:
+                return sync_agent.upload_cookie_blob(
+                    conn,
+                    profile_id,
+                    profile_uuid,
+                    cookie_list,
+                    int(fencing_token or 0),
+                )
+    except Exception:
+        return None
+    return None
+
+
 def _prune_entry(profile_id, entry):
     instances = entry.get("instances")
     if instances is not None:
@@ -1059,6 +1101,21 @@ def open_profile(profile, app_args=None, force_lease=False):
                 lease_info = sync_agent.acquire_lease(
                     conn, profile_uuid, force=bool(force_lease)
                 )
+                if isinstance(lease_info, dict):
+                    latest_blob_id = lease_info.get("latest_cookie_blob_id")
+                    latest_rev = int(lease_info.get("latest_cookie_revision") or 0)
+                    local_rev = profile.get("cookie_revision")
+                    if local_rev is None and profile_id is not None:
+                        prof_row = store.profile_get(conn, profile_id)
+                        if prof_row and "cookie_revision" in prof_row.keys():
+                            local_rev = prof_row["cookie_revision"]
+                    local_rev = int(local_rev or 0)
+                    if latest_blob_id and latest_rev > local_rev:
+                        sync_agent.download_and_inject_cookies(
+                            conn, profile_id, profile_uuid, latest_blob_id
+                        )
+                        profile["cookie_revision"] = latest_rev
+                        profile["cookie_blob_id"] = latest_blob_id
         except sync_agent.SyncLeaseError as error:
             holder_name = (error.data or {}).get("holder_device_name")
             msg = (
@@ -1067,6 +1124,17 @@ def open_profile(profile, app_args=None, force_lease=False):
                 else str(error)
             )
             raise LaunchError(msg, code=1009, data=error.data) from error
+        except Exception:
+            if (
+                lease_info
+                and isinstance(lease_info, dict)
+                and lease_info.get("lease_token")
+            ):
+                _release_profile_lease(
+                    profile_id,
+                    {"uuid": profile_uuid, "lease_token": lease_info.get("lease_token")},
+                )
+            raise
 
     spec = _proxy_spec(profile)
     gost_proc = None
@@ -1146,22 +1214,30 @@ def close_profile(profile_id):
     instances = entry.get("instances") if entry else None
     if instances:
         closed = 0
+        clean_exit = True
         for item in instances:
             item_info = item["info"]
             item_pid = int(item_info.get("pid") or 0)
-            if not _graceful_close(item_info.get("debugging_address"), proc=item["proc"], pid=item_pid) and item_pid:
-                _kill_pgid(item_pid)
+            if not _graceful_close(item_info.get("debugging_address"), proc=item["proc"], pid=item_pid):
+                clean_exit = False
+                if item_pid:
+                    _kill_pgid(item_pid)
             _stop_gost(item_info)
             closed += 1
         _clear_state(profile_id)
+        if clean_exit:
+            _sync_cookies_after_close(profile_id, info)
         _release_profile_lease(profile_id, info)
         return closed > 0
     proc = entry["proc"] if entry else None
     pid = int(info.get("pid") or 0)
-    if not _graceful_close(info.get("debugging_address"), proc=proc, pid=pid) and pid:
+    clean_exit = _graceful_close(info.get("debugging_address"), proc=proc, pid=pid)
+    if not clean_exit and pid:
         _kill_pgid(pid)
     _stop_gost(info)
     _clear_state(profile_id)
+    if clean_exit:
+        _sync_cookies_after_close(profile_id, info)
     _release_profile_lease(profile_id, info)
     return True
 

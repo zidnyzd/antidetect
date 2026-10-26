@@ -1,9 +1,11 @@
 """Read and write Chromium cookie databases for a profile."""
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import time
+from pathlib import Path
 
 from . import launcher
 
@@ -156,8 +158,21 @@ class CookieError(Exception):
     pass
 
 
+def _profiles_dir():
+    from . import paths, store
+
+    if launcher.PROFILES_DIR != paths.DATA_DIR / "profiles":
+        return launcher.PROFILES_DIR
+    if Path(store.DB_PATH) != store._INITIAL_DB_PATH:
+        return Path(store.DB_PATH).parent / "profiles"
+    env_home = os.environ.get("ANTIDETECT_HOME")
+    if env_home:
+        return Path(env_home) / "profiles"
+    return launcher.PROFILES_DIR
+
+
 def _database_path(profile_id):
-    base = launcher.PROFILES_DIR / str(profile_id) / "data" / "Default"
+    base = _profiles_dir() / str(profile_id) / "data" / "Default"
     network = base / "Network" / "Cookies"
     legacy = base / "Cookies"
     if network.exists():
@@ -446,3 +461,75 @@ def clear_saved_passwords(profile_id):
             except OSError as error:
                 raise CookieError(f"gagal menghapus {name}: {error}")
     return True
+
+
+def cookie_digest(cookies_list):
+    if isinstance(cookies_list, int):
+        items = _cookie_list(get_cookies(cookies_list))
+    elif isinstance(cookies_list, str) and cookies_list.strip().isdigit():
+        items = _cookie_list(get_cookies(int(cookies_list.strip())))
+    else:
+        items = _cookie_list(cookies_list)
+
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "").strip()
+        name = str(item.get("name") or "").strip()
+        path = str(item.get("path") or "/")
+        value = "" if item.get("value") is None else str(item.get("value"))
+        expires = _int_value(item.get("expires"))
+        session = bool(item.get("session")) or expires <= 0
+        normalized_expires = 0 if session else expires
+        same_site = _SAMESITE_FROM_DB.get(
+            _same_site_value(item.get("sameSite")), "unspecified"
+        )
+        normalized.append(
+            {
+                "domain": domain,
+                "name": name,
+                "path": path,
+                "value": value,
+                "expires": normalized_expires,
+                "httpOnly": bool(item.get("httpOnly")),
+                "secure": bool(item.get("secure")),
+                "sameSite": same_site,
+                "session": session,
+            }
+        )
+
+    normalized.sort(
+        key=lambda c: (
+            c["domain"],
+            c["path"],
+            c["name"],
+            c["value"],
+            c["expires"],
+        )
+    )
+    canonical_bytes = json.dumps(
+        normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_bytes).hexdigest()
+
+
+def verify_cookie_db(profile_id):
+    try:
+        path = _database_path(int(profile_id))
+    except (TypeError, ValueError):
+        return False
+    if not path.is_file():
+        return False
+    try:
+        if path.stat().st_size == 0:
+            return False
+        conn = sqlite3.connect(str(path), timeout=5)
+        try:
+            row = conn.execute("PRAGMA quick_check").fetchone()
+            return bool(row and str(row[0] or "").strip().lower() == "ok")
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return False
+

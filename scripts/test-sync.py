@@ -1,4 +1,5 @@
-"""Tes otomatis end-to-end untuk sinkronisasi Fase 1 dan Fase 2 tanpa menjalankan engine Chrome."""
+"""Tes otomatis end-to-end untuk sinkronisasi Fase 1, Fase 2, dan Fase 3 tanpa menjalankan engine Chrome."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ os.environ["ANTIDETECT_HOME"] = str(WORK_DIR / "default_home")
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from antidetect import api, launcher, store, sync_agent, sync_crypto, sync_server  # noqa: E402
+from antidetect import api, cookies, launcher, store, sync_agent, sync_crypto, sync_server  # noqa: E402
 
 LEGACY_SCHEMA = """
 CREATE TABLE profiles (
@@ -526,6 +527,36 @@ def test_2_and_3_and_4():
         )
         lease_a2 = test_force_takeover(home_a, home_b, profile_uuid, lease_b)
         test_lease_expiration(home_a, home_b, profile_uuid, lease_a2)
+
+        print("=== Tes 6: Sinkronisasi Cookie Terenkripsi ===")
+        blob_res = test_cookie_blob_upload_encrypted(
+            home_a, server_dir, profile_uuid, pid_a_off
+        )
+        test_cookie_blob_download_and_integrity(
+            home_a,
+            home_b,
+            profile_uuid,
+            pid_a_off,
+            pid_b_off,
+            blob_res["blob_id"],
+        )
+        test_cookie_tampering_rejected(
+            home_a,
+            home_b,
+            server_dir,
+            profile_uuid,
+            pid_b_off,
+            blob_res["blob_id"],
+        )
+        test_stale_fencing_token_rejected(
+            home_a, home_b, profile_uuid, pid_a_off
+        )
+        test_e2e_launch_and_close_cookie_sync(
+            home_a, home_b, profile_uuid, pid_a_off, pid_b_off
+        )
+        test_blob_retention_gc(
+            home_a, server_dir, profile_uuid, pid_a_off
+        )
     finally:
         httpd2.shutdown()
         httpd2.server_close()
@@ -795,13 +826,521 @@ def test_offline_open_policy(home_a, profile_uuid):
     )
 
 
+def test_cookie_blob_upload_encrypted(home_a, server_dir, profile_uuid, pid_a):
+    print("--- 6.1 test_cookie_blob_upload_encrypted ---")
+    sample_cookies = [
+        {
+            "domain": ".tokopedia.com",
+            "name": "_SID_Tokopedia_",
+            "path": "/",
+            "value": "rahasia_tokopedia_val_001",
+            "expires": 1893456000,
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "lax",
+            "session": False,
+        },
+        {
+            "domain": ".shopee.co.id",
+            "name": "SPC_EC",
+            "path": "/",
+            "value": "rahasia_shopee_val_002",
+            "expires": 1893456000,
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "none",
+            "session": False,
+        },
+        {
+            "domain": "zidstore.net",
+            "name": "zs_session_tok",
+            "path": "/dashboard",
+            "value": "sesi_internal_zidstore_003",
+            "expires": 0,
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "strict",
+            "session": True,
+        },
+    ]
+
+    # Verifikasi determinisme dan pengabaian last_access_utc pada cookie_digest
+    digest_1 = cookies.cookie_digest(sample_cookies)
+    with_access_ts = []
+    for item in reversed(sample_cookies):
+        copied = dict(item)
+        copied["last_access_utc"] = 13350000000000000
+        copied["last_access_time"] = 1790000000
+        with_access_ts.append(copied)
+    digest_2 = cookies.cookie_digest(with_access_ts)
+    assert digest_1 == digest_2, "Digest harus identik walau urutan berubah atau ada timestamp akses"
+
+    prev_db = store.DB_PATH
+    prev_prof_dir = launcher.PROFILES_DIR
+    store.DB_PATH = home_a / "antidetect.db"
+    launcher.PROFILES_DIR = home_a / "profiles"
+    try:
+        cookies.update_cookies(pid_a, sample_cookies)
+        assert cookies.verify_cookie_db(pid_a) is True
+        extracted_json = cookies.get_cookies(pid_a)
+        assert cookies.cookie_digest(extracted_json) == digest_1
+    finally:
+        store.DB_PATH = prev_db
+        launcher.PROFILES_DIR = prev_prof_dir
+
+    with store.db(db_path=home_a / "antidetect.db") as conn_a:
+        lease = sync_agent.acquire_lease(conn_a, profile_uuid)
+        upload_res = sync_agent.upload_cookie_blob(
+            conn_a, pid_a, profile_uuid, sample_cookies, lease["fencing_token"]
+        )
+        assert upload_res["blob_id"].startswith("blob_")
+        assert upload_res["cookie_revision"] == 1
+        assert upload_res["seq"] > 0
+
+        # Uji deduplikasi jika cookie tidak berubah
+        dup_res = sync_agent.upload_cookie_blob(
+            conn_a, pid_a, profile_uuid, sample_cookies, lease["fencing_token"]
+        )
+        assert dup_res.get("status") == "skipped"
+        assert dup_res["blob_id"] == upload_res["blob_id"]
+
+        sync_agent.release_lease(
+            conn_a, profile_uuid, lease_token=lease["lease_token"]
+        )
+
+    blob_store = sync_server.LocalFilesystemBlobStore(server_dir)
+    blob_path = blob_store.blob_path(upload_res["blob_id"])
+    assert blob_path.is_file(), f"Berkas blob harus ada di disk: {blob_path}"
+    raw_file_bytes = blob_path.read_bytes()
+    assert len(raw_file_bytes) > 0
+
+    decoded_outer = base64.b64decode(raw_file_bytes)
+    for forbidden in (
+        b"_SID_Tokopedia_",
+        b"SPC_EC",
+        b"zs_session_tok",
+        b"tokopedia.com",
+        b"shopee.co.id",
+        b"zidstore.net",
+        b"rahasia_tokopedia_val_001",
+        b"rahasia_shopee_val_002",
+        b"sesi_internal_zidstore_003",
+    ):
+        assert forbidden not in raw_file_bytes, f"Plaintext bocor di file blob: {forbidden}"
+        assert forbidden not in decoded_outer, f"Plaintext bocor di amplop JSON: {forbidden}"
+
+    print(
+        json.dumps(
+            {
+                "blob_id": upload_res["blob_id"],
+                "cookie_revision": upload_res["cookie_revision"],
+                "blob_file_size": len(raw_file_bytes),
+                "encrypted_at_rest_verified": True,
+                "deduplication_verified": True,
+            },
+            indent=2,
+        )
+    )
+    return upload_res
+
+
+def test_cookie_blob_download_and_integrity(
+    home_a, home_b, profile_uuid, pid_a, pid_b, blob_id
+):
+    print("--- 6.2 test_cookie_blob_download_and_integrity ---")
+    with store.db(db_path=home_b / "antidetect.db") as conn_b:
+        injected = sync_agent.download_and_inject_cookies(
+            conn_b, pid_b, profile_uuid, blob_id
+        )
+        assert injected is True
+        prof_b = store.profile_get(conn_b, pid_b)
+        assert prof_b["cookie_blob_id"] == blob_id
+        assert prof_b["cookie_revision"] == 1
+        assert prof_b["cookie_sha256"] is not None
+
+    prev_prof_dir = launcher.PROFILES_DIR
+    try:
+        launcher.PROFILES_DIR = home_a / "profiles"
+        cookies_a = json.loads(cookies.get_cookies(pid_a))
+
+        launcher.PROFILES_DIR = home_b / "profiles"
+        assert cookies.verify_cookie_db(pid_b) is True
+        cookies_b = json.loads(cookies.get_cookies(pid_b))
+    finally:
+        launcher.PROFILES_DIR = prev_prof_dir
+
+    assert len(cookies_b) == len(cookies_a) == 3
+    assert cookies_b == cookies_a, f"Cookie di B tidak identik dengan A: {cookies_b} vs {cookies_a}"
+    assert cookies.cookie_digest(cookies_b) == cookies.cookie_digest(cookies_a)
+
+    print(
+        json.dumps(
+            {
+                "downloaded_blob_id": blob_id,
+                "cookies_count": len(cookies_b),
+                "sha256_digest": cookies.cookie_digest(cookies_b),
+                "exact_match_100_percent": True,
+            },
+            indent=2,
+        )
+    )
+
+
+def test_cookie_tampering_rejected(
+    home_a, home_b, server_dir, profile_uuid, pid_b, blob_id
+):
+    print("--- 6.3 test_cookie_tampering_rejected ---")
+    prev_prof_dir = launcher.PROFILES_DIR
+    launcher.PROFILES_DIR = home_b / "profiles"
+    try:
+        before_cookies = cookies.get_cookies(pid_b)
+    finally:
+        launcher.PROFILES_DIR = prev_prof_dir
+
+    blob_store = sync_server.LocalFilesystemBlobStore(server_dir)
+    blob_path = blob_store.blob_path(blob_id)
+    original_bytes = blob_path.read_bytes()
+
+    with store.db(db_path=home_b / "antidetect.db") as conn_b:
+        kek, _ = store._load_local_crypto(conn_b)
+
+        # 1) Ubah profile_uuid pada AAD -> harus gagal dengan SyncCryptoError
+        aad_error_caught = False
+        try:
+            sync_crypto.decrypt_blob(
+                original_bytes.decode("utf-8"),
+                kek,
+                "00000000-0000-4000-8000-999999999999",
+                "cookies",
+                1,
+            )
+        except sync_crypto.SyncCryptoError:
+            aad_error_caught = True
+        assert aad_error_caught, "Perubahan AAD wajib melempar SyncCryptoError"
+
+        # 2) Modifikasi 1 byte pada ciphertext di dalam amplop blob di server
+        envelope_obj = json.loads(base64.b64decode(original_bytes).decode("utf-8"))
+        raw_cipher = bytearray(base64.b64decode(envelope_obj["ciphertext_base64"]))
+        raw_cipher[0] ^= 0xFF
+        envelope_obj["ciphertext_base64"] = base64.b64encode(bytes(raw_cipher)).decode("ascii")
+        tampered_b64 = base64.b64encode(
+            json.dumps(envelope_obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
+        blob_path.write_bytes(tampered_b64)
+        try:
+            tamper_caught = False
+            try:
+                sync_agent.download_and_inject_cookies(
+                    conn_b, pid_b, profile_uuid, blob_id
+                )
+            except sync_crypto.SyncCryptoError:
+                tamper_caught = True
+            assert tamper_caught, "Ciphertext rusak wajib melempar SyncCryptoError"
+        finally:
+            blob_path.write_bytes(original_bytes)
+
+    launcher.PROFILES_DIR = home_b / "profiles"
+    try:
+        after_cookies = cookies.get_cookies(pid_b)
+    finally:
+        launcher.PROFILES_DIR = prev_prof_dir
+
+    assert after_cookies == before_cookies, "Database SQLite tidak boleh berubah saat dekripsi gagal"
+
+    print(
+        json.dumps(
+            {
+                "aad_tampering_rejected": True,
+                "ciphertext_byte_tampering_rejected": True,
+                "sqlite_intact": True,
+            },
+            indent=2,
+        )
+    )
+
+
+def test_stale_fencing_token_rejected(home_a, home_b, profile_uuid, pid_a):
+    print("--- 6.4 test_stale_fencing_token_rejected ---")
+    # Naikkan fencing token di server melalui Device B
+    with store.db(db_path=home_b / "antidetect.db") as conn_b:
+        lease_b = sync_agent.acquire_lease(conn_b, profile_uuid)
+        current_fencing = lease_b["fencing_token"]
+        assert current_fencing >= 2
+        sync_agent.release_lease(
+            conn_b, profile_uuid, lease_token=lease_b["lease_token"]
+        )
+
+    stale_cookies = [
+        {
+            "domain": ".konflik.example.com",
+            "name": "zombie_session",
+            "path": "/",
+            "value": "nilai_dari_zombie_writer",
+            "expires": 1893456000,
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "lax",
+            "session": False,
+        }
+    ]
+
+    with store.db(db_path=home_a / "antidetect.db") as conn_a:
+        res_conflict = sync_agent.upload_cookie_blob(
+            conn_a,
+            pid_a,
+            profile_uuid,
+            stale_cookies,
+            fencing_token=1,
+        )
+        assert res_conflict["status"] == "conflict"
+        assert res_conflict["error"] == "STALE_FENCING_TOKEN"
+
+        conflict_row = conn_a.execute(
+            """SELECT * FROM local_conflicts
+               WHERE entity_uuid = ? AND reason = 'STALE_FENCING_TOKEN'
+               ORDER BY created_at DESC LIMIT 1""",
+            (profile_uuid,),
+        ).fetchone()
+        assert conflict_row is not None
+        losing = json.loads(conflict_row["losing_payload"])
+        assert losing["cookies"][0]["name"] == "zombie_session"
+
+    conflict_files = list(
+        (home_a / "profiles" / str(pid_a)).glob("cookies-conflict-*.json")
+    )
+    assert len(conflict_files) >= 1, "Berkas cadangan cookies-conflict-*.json harus tertulis"
+    backup_data = json.loads(conflict_files[0].read_text(encoding="utf-8"))
+    assert backup_data["cookies"][0]["value"] == "nilai_dari_zombie_writer"
+
+    print(
+        json.dumps(
+            {
+                "rejected_fencing_token": 1,
+                "server_current_fencing_token": current_fencing,
+                "status": res_conflict["status"],
+                "error": res_conflict["error"],
+                "conflict_saved_in_db": True,
+                "backup_file_created": conflict_files[0].name,
+            },
+            indent=2,
+        )
+    )
+
+
+def test_e2e_launch_and_close_cookie_sync(home_a, home_b, profile_uuid, pid_a, pid_b):
+    print("--- 6.5 test_e2e_launch_and_close_cookie_sync ---")
+
+    class _DummyProc:
+        pid = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    e2e_cookies = [
+        {
+            "domain": ".e2e-login.id",
+            "name": "auth_session_e2e",
+            "path": "/",
+            "value": "token_login_baru_setelah_tutup_profil_777",
+            "expires": 1893456000,
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "lax",
+            "session": False,
+        },
+        {
+            "domain": ".e2e-login.id",
+            "name": "csrf_e2e",
+            "path": "/",
+            "value": "csrf_token_888",
+            "expires": 0,
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "strict",
+            "session": True,
+        },
+    ]
+
+    prev_db = store.DB_PATH
+    prev_prof_dir = launcher.PROFILES_DIR
+    try:
+        with mock.patch("antidetect.launcher.subprocess.Popen", return_value=_DummyProc()), mock.patch(
+            "antidetect.launcher._wait_for_devtools", return_value=True
+        ):
+            # 1) Device A membuka profil, menulis cookie sesi baru, lalu menutup profil secara bersih
+            store.DB_PATH = home_a / "antidetect.db"
+            launcher.PROFILES_DIR = home_a / "profiles"
+            with store.db(db_path=home_a / "antidetect.db") as conn_a:
+                row_a = store.profile_get(conn_a, pid_a)
+                prof_a = store.profile_to_dict(row_a, include_seed=True)
+                prof_a["id"] = pid_a
+
+            open_info_a = launcher.open_profile(prof_a)
+            assert open_info_a["fencing_token"] > 0
+
+            # Simulasikan penulisan cookie selama sesi browser Device A sebelum proses keluar
+            launcher._open.pop(pid_a, None)
+            cookies.update_cookies(pid_a, e2e_cookies)
+            expected_after_a = json.loads(cookies.get_cookies(pid_a))
+            launcher._open[pid_a] = {"proc": _DummyProc(), "info": open_info_a}
+
+            closed_a = launcher.close_profile(pid_a)
+            assert closed_a is True
+
+            with store.db(db_path=home_a / "antidetect.db") as conn_a:
+                row_a_after = store.profile_get(conn_a, pid_a)
+                assert row_a_after["cookie_revision"] == 2
+                assert row_a_after["cookie_sha256"] == cookies.cookie_digest(expected_after_a)
+
+            # 2) Device B membuka profil yang sama -> otomatis mengunduh dan menginjeksi cookie terbaru
+            store.DB_PATH = home_b / "antidetect.db"
+            launcher.PROFILES_DIR = home_b / "profiles"
+            with store.db(db_path=home_b / "antidetect.db") as conn_b:
+                row_b = store.profile_get(conn_b, pid_b)
+                prof_b = store.profile_to_dict(row_b, include_seed=True)
+                prof_b["id"] = pid_b
+                assert prof_b["cookie_revision"] < 2
+
+            open_info_b = launcher.open_profile(prof_b)
+            assert open_info_b["fencing_token"] > open_info_a["fencing_token"]
+            launcher.close_profile(pid_b)
+
+            injected_b = json.loads(cookies.get_cookies(pid_b))
+            assert injected_b == expected_after_a
+            assert cookies.cookie_digest(injected_b) == cookies.cookie_digest(expected_after_a)
+            names_b = {c["name"] for c in injected_b}
+            assert "auth_session_e2e" in names_b and "csrf_e2e" in names_b
+            with store.db(db_path=home_b / "antidetect.db") as conn_b:
+                row_b_after = store.profile_get(conn_b, pid_b)
+                assert row_b_after["cookie_revision"] == 2
+
+            # 3) Uji aksi API profile-update-cookies juga otomatis menyinkronkan cookie ke server
+            store.DB_PATH = home_a / "antidetect.db"
+            launcher.PROFILES_DIR = home_a / "profiles"
+            with store.db(db_path=home_a / "antidetect.db") as conn_a:
+                lease_api = sync_agent.acquire_lease(conn_a, profile_uuid)
+            try:
+                api_updated = api.profile_update_cookies(
+                    {
+                        "profile_id": pid_a,
+                        "cookie": [
+                            {
+                                "domain": ".api-manual.id",
+                                "name": "manual_cookie_sync",
+                                "path": "/",
+                                "value": "dari_profile_update_cookies_api",
+                                "expires": 1893456000,
+                                "httpOnly": True,
+                                "secure": True,
+                                "sameSite": "lax",
+                                "session": False,
+                            }
+                        ],
+                    }
+                )
+                assert api_updated is True
+            finally:
+                with store.db(db_path=home_a / "antidetect.db") as conn_a:
+                    sync_agent.release_lease(
+                        conn_a, profile_uuid, lease_token=lease_api["lease_token"]
+                    )
+                    row_a_api = store.profile_get(conn_a, pid_a)
+                    assert row_a_api["cookie_revision"] == 3
+    finally:
+        store.DB_PATH = prev_db
+        launcher.PROFILES_DIR = prev_prof_dir
+
+    print(
+        json.dumps(
+            {
+                "device_a_uploaded_revision": 2,
+                "device_b_auto_injected_on_open": True,
+                "device_b_cookie_revision": 2,
+                "api_profile_update_cookies_revision": 3,
+                "synced_cookie_count": len(injected_b),
+            },
+            indent=2,
+        )
+    )
+
+
+def test_blob_retention_gc(home_a, server_dir, profile_uuid, pid_a):
+    print("--- 6.6 test_blob_retention_gc ---")
+    blob_store = sync_server.LocalFilesystemBlobStore(server_dir)
+    uploaded_ids = []
+
+    with store.db(db_path=home_a / "antidetect.db") as conn_a:
+        lease = sync_agent.acquire_lease(conn_a, profile_uuid)
+        try:
+            for idx in range(1, 5):
+                rev_cookies = [
+                    {
+                        "domain": ".gc-test.id",
+                        "name": f"rev_cookie_{idx}",
+                        "path": "/",
+                        "value": f"val_revisi_{idx}_{time.time()}",
+                        "expires": 1893456000,
+                        "httpOnly": True,
+                        "secure": True,
+                        "sameSite": "lax",
+                        "session": False,
+                    }
+                ]
+                res = sync_agent.upload_cookie_blob(
+                    conn_a, pid_a, profile_uuid, rev_cookies, lease["fencing_token"]
+                )
+                uploaded_ids.append(res["blob_id"])
+        finally:
+            sync_agent.release_lease(
+                conn_a, profile_uuid, lease_token=lease["lease_token"]
+            )
+
+    assert len(uploaded_ids) == 4
+    first_blob_id = uploaded_ids[0]
+    kept_blob_ids = uploaded_ids[1:]
+
+    with sync_server.connect_server_db(server_dir / "server_sync.db") as sconn:
+        rows = sconn.execute(
+            """SELECT blob_id, revision FROM profile_blobs
+               WHERE profile_uuid = ? AND blob_kind = 'cookies'
+               ORDER BY revision DESC""",
+            (profile_uuid,),
+        ).fetchall()
+        db_blob_ids = [r["blob_id"] for r in rows]
+
+    assert len(db_blob_ids) == 3, f"Server hanya boleh menyimpan 3 revisi terakhir, ditemukan: {db_blob_ids}"
+    assert db_blob_ids == list(reversed(kept_blob_ids))
+    assert first_blob_id not in db_blob_ids
+    assert not blob_store.exists(first_blob_id), "File revisi lama harus terhapus dari disk"
+    for kept_id in kept_blob_ids:
+        assert blob_store.exists(kept_id), f"File revisi terbaru {kept_id} harus tetap ada di disk"
+
+    all_bin_files = list((server_dir / "blobs").glob("**/*.bin"))
+    assert len(all_bin_files) == 3, f"Total file .bin di disk harus 3, ditemukan: {len(all_bin_files)}"
+
+    print(
+        json.dumps(
+            {
+                "uploaded_revisions_in_batch": 4,
+                "retained_blobs_in_db": len(db_blob_ids),
+                "retained_files_on_disk": len(all_bin_files),
+                "evicted_blob_id": first_blob_id,
+                "retained_blob_ids": db_blob_ids,
+            },
+            indent=2,
+        )
+    )
+
+
 def main():
     try:
         test_1_legacy_migration()
         test_2_and_3_and_4()
-        print("ALL SYNC PHASE 1 & PHASE 2 TESTS PASSED")
+        print("ALL SYNC PHASE 1, PHASE 2 & PHASE 3 TESTS PASSED")
     finally:
         shutil.rmtree(WORK_DIR, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

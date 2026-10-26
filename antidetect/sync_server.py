@@ -1,6 +1,7 @@
 """Server sinkronisasi metadata untuk antidetect."""
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import threading
@@ -13,6 +14,8 @@ from . import sync_crypto
 from .paths import DATA_DIR
 
 DEFAULT_GROUP_UUID = "00000000-0000-4000-8000-000000000001"
+MAX_COOKIE_BLOB_BYTES = 10 * 1024 * 1024
+BLOB_RETENTION_COUNT = 3
 
 SERVER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -281,6 +284,104 @@ def resolve_db_path(db_path=None):
         if "server_sync" not in candidate.name and not candidate.suffix:
             return candidate / "server_sync.db"
     return candidate
+
+
+def _server_db_path(conn):
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        for row in rows:
+            name = row[1] if isinstance(row, tuple) else row["name"]
+            file_path = row[2] if isinstance(row, tuple) else row["file"]
+            if name == "main" and file_path:
+                return Path(file_path)
+    except Exception:
+        pass
+    return resolve_db_path()
+
+
+class LocalFilesystemBlobStore:
+    def __init__(self, target=None):
+        if target is None:
+            db_file = resolve_db_path()
+            self.root_dir = db_file.parent / "blobs"
+        else:
+            candidate = Path(target)
+            if candidate.name == "blobs":
+                self.root_dir = candidate
+            elif candidate.suffix == ".db":
+                self.root_dir = candidate.parent / "blobs"
+            else:
+                db_file = resolve_db_path(candidate)
+                self.root_dir = db_file.parent / "blobs"
+
+    @staticmethod
+    def _prefix(blob_id):
+        clean = str(blob_id or "").strip()
+        if clean.startswith("blob_") and len(clean) >= 7:
+            clean = clean[5:]
+        return (clean[:2] or "00").lower()
+
+    def storage_key(self, blob_id):
+        clean_id = Path(str(blob_id or "").strip()).name
+        if not clean_id:
+            raise SyncServerError(400, 2003, "blob_id tidak valid")
+        prefix_2 = self._prefix(clean_id)
+        return f"{prefix_2}/{clean_id}.bin"
+
+    def blob_path(self, blob_id):
+        clean_id = Path(str(blob_id or "").strip()).name
+        if not clean_id:
+            raise SyncServerError(400, 2003, "blob_id tidak valid")
+        prefix_2 = self._prefix(clean_id)
+        return self.root_dir / prefix_2 / f"{clean_id}.bin"
+
+    def exists(self, blob_id):
+        try:
+            return self.blob_path(blob_id).is_file()
+        except Exception:
+            return False
+
+    def put(self, blob_id, data):
+        path = self.blob_path(blob_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, str):
+            raw_bytes = data.encode("utf-8")
+        elif isinstance(data, (bytes, bytearray)):
+            raw_bytes = bytes(data)
+        else:
+            raise SyncServerError(400, 2003, "Data blob tidak valid")
+        tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(4)}.tmp")
+        try:
+            with open(tmp_path, "wb") as handle:
+                handle.write(raw_bytes)
+                handle.flush()
+            os.replace(str(tmp_path), str(path))
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+        return self.storage_key(blob_id)
+
+    def get(self, blob_id):
+        path = self.blob_path(blob_id)
+        if not path.is_file():
+            raise SyncServerError(404, 2008, "Blob tidak ditemukan")
+        try:
+            return path.read_bytes()
+        except OSError as error:
+            raise SyncServerError(404, 2008, f"Gagal membaca blob: {error}") from error
+
+    def delete(self, blob_id):
+        try:
+            path = self.blob_path(blob_id)
+            if path.exists():
+                path.unlink()
+                return True
+        except OSError:
+            pass
+        return False
 
 
 def connect_server_db(db_path=None):
@@ -825,6 +926,13 @@ def _apply_entity_write(conn, entity_type, entity_uuid, operation, payload, new_
     if entity_type == "profile":
         if operation == "purge":
             purged_at = payload.get("purged_at") or changed_at
+            blob_store = LocalFilesystemBlobStore(_server_db_path(conn))
+            old_blobs = conn.execute(
+                "SELECT blob_id FROM profile_blobs WHERE profile_uuid = ?",
+                (entity_uuid,),
+            ).fetchall()
+            for b_row in old_blobs:
+                blob_store.delete(b_row["blob_id"])
             conn.execute("DELETE FROM profile_blobs WHERE profile_uuid = ?", (entity_uuid,))
             conn.execute("DELETE FROM profile_leases WHERE profile_uuid = ?", (entity_uuid,))
             conn.execute(
@@ -1439,6 +1547,238 @@ def handle_release_lease(conn, device, body, ip_address=None):
     return {"released": True}
 
 
+def handle_upload_blob(conn, device, body, ip_address=None):
+    profile_uuid = str(body.get("profile_uuid") or "").strip()
+    if not profile_uuid:
+        raise SyncServerError(400, 2003, "profile_uuid wajib diisi")
+
+    blob_kind = str(body.get("blob_kind") or "cookies").strip() or "cookies"
+    if blob_kind not in ("cookies", "bookmarks", "extension_pkg", "snapshot"):
+        raise SyncServerError(400, 2003, f"blob_kind tidak didukung: {blob_kind}")
+
+    try:
+        fencing_token = int(body.get("fencing_token") or 0)
+    except (TypeError, ValueError) as error:
+        raise SyncServerError(400, 2003, "fencing_token harus berupa bilangan bulat") from error
+
+    encryption_scheme = (
+        str(body.get("encryption_scheme") or "aes-256-gcm-v1").strip()
+        or "aes-256-gcm-v1"
+    )
+    sha256_plain = str(body.get("sha256_plain") or "").strip()
+    ciphertext_base64 = str(body.get("ciphertext_base64") or "").strip()
+    if not sha256_plain or not ciphertext_base64:
+        raise SyncServerError(
+            400, 2003, "sha256_plain dan ciphertext_base64 wajib diisi"
+        )
+
+    sha256_cipher = (
+        str(body.get("sha256_cipher") or "").strip()
+        or hashlib.sha256(ciphertext_base64.encode("utf-8")).hexdigest()
+    )
+    try:
+        size_bytes = int(body.get("size_bytes") or len(ciphertext_base64))
+    except (TypeError, ValueError):
+        size_bytes = len(ciphertext_base64)
+
+    if size_bytes > MAX_COOKIE_BLOB_BYTES or len(ciphertext_base64) > MAX_COOKIE_BLOB_BYTES * 2:
+        raise SyncServerError(413, 2010, "Ukuran blob melebihi batas maksimum 10 MB")
+
+    profile_row = conn.execute(
+        "SELECT * FROM sync_profiles WHERE uuid = ?", (profile_uuid,)
+    ).fetchone()
+    if not profile_row:
+        raise SyncServerError(404, 2003, "Profil tidak ditemukan")
+
+    last_fencing_token = int(profile_row["last_fencing_token"] or 0)
+    if fencing_token < last_fencing_token:
+        _audit(
+            conn,
+            device["device_id"],
+            "blob_upload_stale_fence",
+            409,
+            target_uuid=profile_uuid,
+            ip_address=ip_address,
+            detail=f"fencing_token={fencing_token}<{last_fencing_token}",
+        )
+        conn.commit()
+        raise SyncServerError(
+            409,
+            2006,
+            f"Fencing token usang ({fencing_token} < {last_fencing_token})",
+            {"current_fencing_token": last_fencing_token},
+        )
+
+    blob_store = LocalFilesystemBlobStore(_server_db_path(conn))
+    active_blob_id = profile_row["cookie_blob_id"] if blob_kind == "cookies" else None
+    if active_blob_id:
+        active_row = conn.execute(
+            """SELECT * FROM profile_blobs
+               WHERE blob_id = ? AND profile_uuid = ? AND blob_kind = ?""",
+            (active_blob_id, profile_uuid, blob_kind),
+        ).fetchone()
+        if (
+            active_row is not None
+            and active_row["sha256_plain"] == sha256_plain
+            and blob_store.exists(active_blob_id)
+        ):
+            seq_row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS s FROM change_log WHERE entity_uuid = ?",
+                (profile_uuid,),
+            ).fetchone()
+            return {
+                "blob_id": active_blob_id,
+                "profile_uuid": profile_uuid,
+                "cookie_revision": int(
+                    profile_row["cookie_revision"] or active_row["revision"]
+                ),
+                "seq": int(seq_row["s"] if seq_row else 0),
+            }
+
+    current_cookie_revision = int(profile_row["cookie_revision"] or 0)
+    cookie_revision = current_cookie_revision + 1
+    if body.get("revision") is not None:
+        try:
+            client_rev = int(body.get("revision"))
+        except (TypeError, ValueError):
+            client_rev = cookie_revision
+        if client_rev != cookie_revision:
+            raise SyncServerError(
+                409,
+                2007,
+                f"Revisi cookie belum sinkron ({client_rev} != {cookie_revision})",
+                {"expected_revision": cookie_revision},
+            )
+
+    blob_id = f"blob_{secrets.token_hex(12)}"
+    storage_key = blob_store.put(blob_id, ciphertext_base64.encode("utf-8"))
+    now = now_utc()
+
+    conn.execute(
+        """UPDATE sync_profiles
+           SET cookie_blob_id = ?,
+               cookie_revision = ?,
+               cookie_updated_at = ?,
+               cookie_origin_device = ?,
+               last_fencing_token = MAX(last_fencing_token, ?)
+           WHERE uuid = ?""",
+        (
+            blob_id,
+            cookie_revision,
+            now,
+            device["device_id"],
+            fencing_token,
+            profile_uuid,
+        ),
+    )
+
+    conn.execute(
+        """INSERT INTO profile_blobs
+           (blob_id, profile_uuid, blob_kind, revision, sha256_plain, sha256_cipher,
+            size_bytes, encryption_scheme, storage_key, created_at, origin_device)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            blob_id,
+            profile_uuid,
+            blob_kind,
+            cookie_revision,
+            sha256_plain,
+            sha256_cipher,
+            size_bytes,
+            encryption_scheme,
+            storage_key,
+            now,
+            device["device_id"],
+        ),
+    )
+
+    change_payload = {
+        "blob_id": blob_id,
+        "cookie_revision": cookie_revision,
+        "sha256_plain": sha256_plain,
+        "sha256_cipher": sha256_cipher,
+    }
+    cur = conn.execute(
+        """INSERT INTO change_log
+           (entity_type, entity_uuid, operation, revision, origin_device, changed_at, payload)
+           VALUES ('cookie_blob', ?, 'upsert', ?, ?, ?, ?)""",
+        (
+            profile_uuid,
+            cookie_revision,
+            device["device_id"],
+            now,
+            _dumps_json(change_payload),
+        ),
+    )
+    seq = int(cur.lastrowid)
+
+    blob_rows = conn.execute(
+        """SELECT blob_id FROM profile_blobs
+           WHERE profile_uuid = ? AND blob_kind = ?
+           ORDER BY revision DESC""",
+        (profile_uuid, blob_kind),
+    ).fetchall()
+    for stale_row in blob_rows[BLOB_RETENTION_COUNT:]:
+        stale_blob_id = stale_row["blob_id"]
+        blob_store.delete(stale_blob_id)
+        conn.execute("DELETE FROM profile_blobs WHERE blob_id = ?", (stale_blob_id,))
+
+    _audit(
+        conn,
+        device["device_id"],
+        "blob_upload",
+        200,
+        target_uuid=profile_uuid,
+        ip_address=ip_address,
+        detail=f"blob_id={blob_id} rev={cookie_revision}",
+    )
+    conn.commit()
+    return {
+        "blob_id": blob_id,
+        "profile_uuid": profile_uuid,
+        "cookie_revision": cookie_revision,
+        "seq": seq,
+    }
+
+
+def handle_download_blob(conn, device, body, ip_address=None):
+    blob_id = str(body.get("blob_id") or "").strip()
+    if not blob_id:
+        raise SyncServerError(400, 2003, "blob_id wajib diisi")
+
+    row = conn.execute(
+        "SELECT * FROM profile_blobs WHERE blob_id = ?", (blob_id,)
+    ).fetchone()
+    if not row:
+        raise SyncServerError(404, 2008, "Blob tidak ditemukan")
+
+    blob_store = LocalFilesystemBlobStore(_server_db_path(conn))
+    raw_bytes = blob_store.get(blob_id)
+    ciphertext_base64 = raw_bytes.decode("utf-8", errors="replace")
+
+    _audit(
+        conn,
+        device["device_id"],
+        "blob_download",
+        200,
+        target_uuid=row["profile_uuid"],
+        ip_address=ip_address,
+        detail=f"blob_id={blob_id}",
+    )
+    conn.commit()
+    return {
+        "blob_id": blob_id,
+        "profile_uuid": row["profile_uuid"],
+        "blob_kind": row["blob_kind"],
+        "revision": int(row["revision"]),
+        "encryption_scheme": row["encryption_scheme"],
+        "sha256_plain": row["sha256_plain"],
+        "sha256_cipher": row["sha256_cipher"],
+        "size_bytes": int(row["size_bytes"]),
+        "ciphertext_base64": ciphertext_base64,
+    }
+
+
 class SyncHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1522,6 +1862,18 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
             if route == "/v1/sync/lease/release":
                 device = _authenticate(conn, self.headers.get("Authorization"), ip_address=self._client_ip())
                 data = handle_release_lease(conn, device, body, ip_address=self._client_ip())
+                self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
+                return
+
+            if route == "/v1/sync/blob/upload":
+                device = _authenticate(conn, self.headers.get("Authorization"), ip_address=self._client_ip())
+                data = handle_upload_blob(conn, device, body, ip_address=self._client_ip())
+                self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
+                return
+
+            if route == "/v1/sync/blob/download":
+                device = _authenticate(conn, self.headers.get("Authorization"), ip_address=self._client_ip())
+                data = handle_download_blob(conn, device, body, ip_address=self._client_ip())
                 self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
                 return
 

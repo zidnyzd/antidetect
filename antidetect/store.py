@@ -486,6 +486,8 @@ def profile_to_dict(row, include_seed=True):
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "deleted_at": row["deleted_at"],
+        "cookie_blob_id": _row_val(row, "cookie_blob_id"),
+        "cookie_revision": int(_row_val(row, "cookie_revision") or 0),
     }
     if include_seed:
         data["seed"] = row["seed"]
@@ -1804,11 +1806,22 @@ def apply_remote_change(conn, change):
         seed_val = int(payload.get("seed") or secrets.randbelow(2**31 - 1) + 1)
         cookie_blob_id = payload.get("cookie_blob_id")
         cookie_revision = int(payload.get("cookie_revision") or 0)
+        is_self_origin = bool(origin_device and origin_device == get_device_id(conn))
 
         existing = conn.execute(
             "SELECT * FROM profiles WHERE uuid = ?", (entity_uuid,)
         ).fetchone()
         if existing:
+            local_cookie_blob = (
+                cookie_blob_id
+                if is_self_origin and cookie_blob_id
+                else existing["cookie_blob_id"]
+            )
+            local_cookie_rev = (
+                max(cookie_revision, int(existing["cookie_revision"] or 0))
+                if is_self_origin
+                else int(existing["cookie_revision"] or 0)
+            )
             conn.execute(
                 """UPDATE profiles SET
                        name = ?,
@@ -1830,8 +1843,8 @@ def apply_remote_change(conn, change):
                        purged_at = NULL,
                        revision = ?,
                        origin_device = ?,
-                       cookie_blob_id = COALESCE(?, cookie_blob_id),
-                       cookie_revision = MAX(?, COALESCE(cookie_revision, 0)),
+                       cookie_blob_id = ?,
+                       cookie_revision = ?,
                        sync_dirty = 0
                    WHERE id = ?""",
                 (
@@ -1857,12 +1870,14 @@ def apply_remote_change(conn, change):
                     deleted_at,
                     revision,
                     origin_device,
-                    cookie_blob_id,
-                    cookie_revision,
+                    local_cookie_blob,
+                    local_cookie_rev,
                     existing["id"],
                 ),
             )
         else:
+            init_cookie_blob = cookie_blob_id if is_self_origin else None
+            init_cookie_rev = cookie_revision if is_self_origin else 0
             conn.execute(
                 """INSERT INTO profiles
                    (name, group_id, color, note, site_id, site_url,
@@ -1891,11 +1906,34 @@ def apply_remote_change(conn, change):
                     entity_uuid,
                     revision,
                     origin_device,
-                    cookie_blob_id,
-                    cookie_revision,
+                    init_cookie_blob,
+                    init_cookie_rev,
                 ),
             )
         conn.commit()
+        return True
+
+    if entity_type == "cookie_blob":
+        if origin_device and origin_device == get_device_id(conn):
+            row = conn.execute(
+                "SELECT id, cookie_revision FROM profiles WHERE uuid = ?",
+                (entity_uuid,),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    """UPDATE profiles
+                       SET cookie_blob_id = COALESCE(?, cookie_blob_id),
+                           cookie_revision = MAX(?, COALESCE(cookie_revision, 0)),
+                           cookie_sha256 = COALESCE(?, cookie_sha256)
+                       WHERE id = ?""",
+                    (
+                        payload.get("blob_id"),
+                        int(payload.get("cookie_revision") or revision or 0),
+                        payload.get("sha256_plain"),
+                        row["id"],
+                    ),
+                )
+                conn.commit()
         return True
 
     return False
