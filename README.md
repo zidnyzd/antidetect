@@ -167,7 +167,13 @@ dari domain cookie, dan UA mentah disimpan di `fingerprint_config.ua`.
 ```
 
 Action API `profile-import-ixbrowser` menerima `{path, dry_run, update_existing}`
-dengan `path` absolut berakhiran `.zip` di bawah direktori home pengguna.
+dengan `path` absolut berakhiran `.zip` di bawah direktori home pengguna, atau
+unggahan `{content_base64, filename, metadata_base64, dry_run, update_existing}`
+maksimal 50 MB per file. Di UI, tombol "Impor ixBrowser" pada toolbar daftar
+profil membuka dialog untuk memilih ZIP cookie wajib dan ZIP metadata opsional
+(`Export Profile.zip`), menjalankan pratinjau isi arsip beserta deteksi judul
+duplikat dan nama yang sudah ada, lalu mengimpor profil dan cookie dengan opsi
+memperbarui cookie pada profil yang namanya sudah ada.
 
 ## Riwayat cek proxy
 

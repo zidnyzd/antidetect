@@ -47,6 +47,7 @@ export const api = {
   importProfile: (content, password = '') =>
     call('profile-import', { content_base64: content, ...(password ? { password } : {}) }),
   importCsv: (text) => call('profile-import-csv', { text }),
+  importIxbrowser: (payload) => call('profile-import-ixbrowser', payload),
   bookmarks: (profileId) => call('profile-bookmarks', { profile_id: profileId }),
   addBookmark: (profileId, bookmark) => call('profile-bookmark-add', { profile_id: profileId, ...bookmark }),
   deleteBookmark: (profileId, bookmarkId) =>

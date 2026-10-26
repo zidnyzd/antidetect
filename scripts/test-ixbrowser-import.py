@@ -5,6 +5,7 @@ tanpa menyentuh data asli dan tanpa menjalankan engine browser.
 Nilai cookie tidak pernah dicetak; verifikasi memakai hash SHA-256.
 """
 from collections import Counter
+import base64
 import hashlib
 import io
 import json
@@ -74,6 +75,7 @@ def test_1_read_export():
         )
     )
     assert len(profiles) == 200, f"expected 200 profiles, got {len(profiles)}"
+    assert exported["metadata"] is True, "expected metadata=True"
     assert total_cookies == 12009, f"expected 12009 cookies, got {total_cookies}"
     assert empty_files == 2, f"expected 2 empty files, got {empty_files}"
     assert duplicates == ["LINK 78"], f"expected ['LINK 78'], got {duplicates}"
@@ -145,6 +147,7 @@ def test_3_preview():
     result = iximport.preview(COOKIES_ZIP)
     print(json.dumps(result, indent=2))
     assert not store.DB_PATH.exists(), "preview tidak boleh menulis database"
+    assert result["metadata"] is True
     assert result["total"] == 200
     assert result["cookies"] == 12009
     assert result["empty_cookie_files"] == 2
@@ -294,12 +297,19 @@ def test_edge_cases():
         )
 
     read_res = iximport.read_export(custom_zip)
+    assert read_res["metadata"] is False
     assert len(read_res["profiles"]) == 2
     assert len(read_res["errors"]) == 2
     p901 = next(p for p in read_res["profiles"] if p["serial"] == 901)
     assert p901["group"] == "Default Group"
     assert p901["cookies"][0]["sameSite"] == -1
     assert p901["cookies"][0]["session"] is True
+
+    read_with_meta = iximport.read_export(custom_zip, metadata_path=PROFILE_ZIP)
+    assert read_with_meta["metadata"] is True
+    p364_meta = next(p for p in read_with_meta["profiles"] if p["serial"] == 364)
+    assert p364_meta["group"] != "Default Group"
+    assert bool(p364_meta["ua"]) is True
 
     upd_res = iximport.apply_import(custom_zip, update_existing=True)
     assert upd_res["created"] == 1
@@ -322,11 +332,15 @@ def test_6_api():
     non_zip_file = api_home / "bukan.txt"
     non_zip_file.write_text("halo", encoding="utf-8")
 
+    python_bin = REPO / "venv" / "bin" / "python"
+    if not python_bin.exists():
+        python_bin = Path(sys.executable)
+
     env = dict(os.environ)
     env["ANTIDETECT_HOME"] = str(api_home)
     proc = subprocess.Popen(
         [
-            str(REPO / "venv" / "bin" / "python"),
+            str(python_bin),
             "-m",
             "antidetect",
             "serve",
@@ -354,17 +368,141 @@ def test_6_api():
                 time.sleep(0.2)
         assert ready, "Server API gagal start di port 53360"
 
+        # 5. Path lama masih berfungsi untuk dry run.
         status_dry, body_dry = post_api(
             API_PORT,
             "profile-import-ixbrowser",
             {"path": str(COOKIES_ZIP), "dry_run": True},
         )
-        print("API dry_run=True:", json.dumps({"http_status": status_dry, "body": body_dry}))
+        print("API path dry_run=True:", json.dumps({"http_status": status_dry, "body": body_dry}))
         assert status_dry == 200
         assert body_dry["error"]["code"] == 0
         assert body_dry["data"]["dry_run"] is True
+        assert body_dry["data"]["metadata"] is True
         assert body_dry["data"]["total"] == 200
         assert body_dry["data"]["cookies"] == 12009
+
+        cookies_b64 = base64.b64encode(COOKIES_ZIP.read_bytes()).decode("ascii")
+        profile_b64 = base64.b64encode(PROFILE_ZIP.read_bytes()).decode("ascii")
+
+        # 1. Base64 dry run dengan kedua zip: 200 profil, 12009 cookie, metadata: true, dry_run: true.
+        status_b64_dry, body_b64_dry = post_api(
+            API_PORT,
+            "profile-import-ixbrowser",
+            {
+                "content_base64": cookies_b64,
+                "filename": "Export Profiles Cookies.zip",
+                "metadata_base64": profile_b64,
+                "dry_run": True,
+            },
+        )
+        print(
+            "API base64 dry_run=True (kedua zip):",
+            json.dumps({"http_status": status_b64_dry, "body": body_b64_dry}),
+        )
+        assert status_b64_dry == 200
+        assert body_b64_dry["error"]["code"] == 0
+        assert body_b64_dry["data"]["total"] == 200
+        assert body_b64_dry["data"]["cookies"] == 12009
+        assert body_b64_dry["data"]["metadata"] is True
+        assert body_b64_dry["data"]["dry_run"] is True
+
+        # 3. Export Profile.zip saja lewat base64: 62 profil, metadata: true.
+        status_prof_only, body_prof_only = post_api(
+            API_PORT,
+            "profile-import-ixbrowser",
+            {
+                "content_base64": profile_b64,
+                "filename": "Export Profile.zip",
+                "dry_run": True,
+            },
+        )
+        print(
+            "API base64 Export Profile.zip saja:",
+            json.dumps({"http_status": status_prof_only, "body": body_prof_only}),
+        )
+        assert status_prof_only == 200
+        assert body_prof_only["error"]["code"] == 0
+        assert body_prof_only["data"]["total"] == 62
+        assert body_prof_only["data"]["metadata"] is True
+        assert body_prof_only["data"]["dry_run"] is True
+
+        # 4. content_base64 dan path bersamaan ditolak kode 1000. Base64 rusak ditolak. Isi kosong ditolak.
+        status_both, body_both = post_api(
+            API_PORT,
+            "profile-import-ixbrowser",
+            {
+                "path": str(COOKIES_ZIP),
+                "content_base64": cookies_b64,
+                "dry_run": True,
+            },
+        )
+        print("API path + content_base64:", json.dumps({"http_status": status_both, "body": body_both}))
+        assert status_both == 200
+        assert body_both["error"]["code"] == 1000
+
+        status_bad_b64, body_bad_b64 = post_api(
+            API_PORT,
+            "profile-import-ixbrowser",
+            {"content_base64": "!!!bukan-base64!!!", "dry_run": True},
+        )
+        print("API invalid base64:", json.dumps({"http_status": status_bad_b64, "body": body_bad_b64}))
+        assert status_bad_b64 == 200
+        assert body_bad_b64["error"]["code"] == 1000
+
+        status_empty_b64, body_empty_b64 = post_api(
+            API_PORT,
+            "profile-import-ixbrowser",
+            {"content_base64": "", "dry_run": True},
+        )
+        print("API empty content_base64:", json.dumps({"http_status": status_empty_b64, "body": body_empty_b64}))
+        assert status_empty_b64 == 200
+        assert body_empty_b64["error"]["code"] == 1000
+
+        status_none, body_none = post_api(
+            API_PORT,
+            "profile-import-ixbrowser",
+            {"dry_run": True},
+        )
+        print("API neither path nor content_base64:", json.dumps({"http_status": status_none, "body": body_none}))
+        assert status_none == 200
+        assert body_none["error"]["code"] == 1000
+
+        status_meta_path, body_meta_path = post_api(
+            API_PORT,
+            "profile-import-ixbrowser",
+            {"path": str(COOKIES_ZIP), "metadata_base64": profile_b64, "dry_run": True},
+        )
+        print("API path + metadata_base64:", json.dumps({"http_status": status_meta_path, "body": body_meta_path}))
+        assert status_meta_path == 200
+        assert body_meta_path["error"]["code"] == 1000
+
+        # 2. Base64 apply pada home kosong: 200 profil dibuat dan 12009 cookie tertulis.
+        status_b64_apply, body_b64_apply = post_api(
+            API_PORT,
+            "profile-import-ixbrowser",
+            {
+                "content_base64": cookies_b64,
+                "filename": "Export Profiles Cookies.zip",
+                "metadata_base64": profile_b64,
+                "dry_run": False,
+            },
+        )
+        print(
+            "API base64 apply (dry_run=False):",
+            json.dumps({"http_status": status_b64_apply, "body": body_b64_apply}),
+        )
+        assert status_b64_apply == 200
+        assert body_b64_apply["error"]["code"] == 0
+        assert body_b64_apply["data"]["dry_run"] is False
+        assert body_b64_apply["data"]["metadata"] is True
+        assert body_b64_apply["data"]["created"] == 200
+        assert body_b64_apply["data"]["cookies"] == 12009
+        assert body_b64_apply["data"]["errors"] == []
+
+        tmp_dir = api_home / "imports" / "tmp"
+        leftover_tmp = list(tmp_dir.glob("*.zip")) if tmp_dir.exists() else []
+        assert leftover_tmp == [], f"file tmp tidak terhapus: {leftover_tmp}"
 
         status_rel, body_rel = post_api(
             API_PORT,

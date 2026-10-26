@@ -207,11 +207,31 @@ def _parse_xlsx_bytes(xlsx_bytes):
     return rows_by_serial
 
 
-def _load_excel_metadata(archive, infos, zip_path):
+def _extract_excel_rows(archive, infos):
     for info in infos:
         if not info.is_dir() and info.filename.lower().endswith(".xlsx"):
             raw = _read_bounded(archive, info, MAX_UNCOMPRESSED_BYTES)
-            return _parse_xlsx_bytes(raw)
+            rows = _parse_xlsx_bytes(raw)
+            if rows:
+                return rows
+    return None
+
+
+def _load_excel_metadata(archive, infos, zip_path, metadata_path=None):
+    rows = _extract_excel_rows(archive, infos)
+    if rows is not None:
+        return rows, True
+
+    if metadata_path is not None and str(metadata_path).strip():
+        meta_candidate = _validate_zip_file(metadata_path)
+        try:
+            with zipfile.ZipFile(meta_candidate) as meta_archive:
+                meta_infos = _check_archive_limits(meta_archive, check_txt_limit=False)
+                rows = _extract_excel_rows(meta_archive, meta_infos)
+                if rows is not None:
+                    return rows, True
+        except (zipfile.BadZipFile, OSError) as error:
+            raise IxImportError(f"file metadata bukan arsip zip yang valid: {error}")
 
     sibling_zip = zip_path.parent / "Export Profile.zip"
     if sibling_zip.is_file() and sibling_zip.resolve() != zip_path.resolve():
@@ -219,13 +239,12 @@ def _load_excel_metadata(archive, infos, zip_path):
             if sibling_zip.stat().st_size <= MAX_ZIP_BYTES:
                 with zipfile.ZipFile(sibling_zip) as sib_archive:
                     sib_infos = _check_archive_limits(sib_archive, check_txt_limit=False)
-                    for info in sib_infos:
-                        if not info.is_dir() and info.filename.lower().endswith(".xlsx"):
-                            raw = _read_bounded(sib_archive, info, MAX_UNCOMPRESSED_BYTES)
-                            return _parse_xlsx_bytes(raw)
+                    rows = _extract_excel_rows(sib_archive, sib_infos)
+                    if rows is not None:
+                        return rows, True
         except (IxImportError, zipfile.BadZipFile, OSError):
-            return {}
-    return {}
+            return {}, False
+    return {}, False
 
 
 def _parse_same_site(value):
@@ -285,7 +304,7 @@ def infer_platform(cookie_list):
     return CUSTOM_SITE_ID, None
 
 
-def read_export(zip_path):
+def read_export(zip_path, metadata_path=None):
     candidate = _validate_zip_file(zip_path)
     try:
         archive = zipfile.ZipFile(candidate)
@@ -294,7 +313,9 @@ def read_export(zip_path):
 
     with archive:
         infos = _check_archive_limits(archive, check_txt_limit=True)
-        excel_rows = _load_excel_metadata(archive, infos, candidate)
+        excel_rows, has_metadata = _load_excel_metadata(
+            archive, infos, candidate, metadata_path=metadata_path
+        )
         profiles = []
         errors = []
 
@@ -369,6 +390,7 @@ def read_export(zip_path):
     profiles.sort(key=lambda item: (item["serial"], item["name"]))
     return {
         "source": str(candidate),
+        "metadata": has_metadata,
         "profiles": profiles,
         "errors": errors,
     }
@@ -390,8 +412,8 @@ def _stored_profile_names():
         return set()
 
 
-def preview(zip_path, existing_names=()):
-    exported = read_export(zip_path)
+def preview(zip_path, existing_names=(), metadata_path=None):
+    exported = read_export(zip_path, metadata_path=metadata_path)
     profiles = exported["profiles"]
 
     if existing_names:
@@ -424,6 +446,7 @@ def preview(zip_path, existing_names=()):
             "first": min(serials) if serials else 0,
             "last": max(serials) if serials else 0,
         },
+        "metadata": exported["metadata"],
     }
 
 
@@ -450,8 +473,8 @@ def _resolve_group(conn, group_title, group_cache):
     return cur.lastrowid, True
 
 
-def apply_import(zip_path, update_existing=False):
-    exported = read_export(zip_path)
+def apply_import(zip_path, update_existing=False, metadata_path=None):
+    exported = read_export(zip_path, metadata_path=metadata_path)
     store.init()
 
     with store.db() as conn:
@@ -537,4 +560,5 @@ def apply_import(zip_path, update_existing=False):
         "cookies": cookies_written,
         "groups_created": groups_created,
         "errors": errors,
+        "metadata": exported["metadata"],
     }

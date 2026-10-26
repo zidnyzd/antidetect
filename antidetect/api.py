@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,7 @@ from . import (
     store,
     templates,
 )
+from .paths import DATA_DIR
 
 ACTIONS = {}
 
@@ -590,18 +592,104 @@ def _validate_ixbrowser_zip_path(raw_path):
     return resolved
 
 
+def _decode_ixbrowser_zip_base64(value, label="zip"):
+    if not isinstance(value, str):
+        raise ApiError(1000, f"isi file {label} harus berupa base64")
+    raw = value.strip()
+    if not raw:
+        raise ApiError(1000, f"isi file {label} kosong")
+    if raw.startswith("data:") and "," in raw:
+        raw = raw.split(",", 1)[1].strip()
+    compact = "".join(raw.split())
+    if not compact:
+        raise ApiError(1000, f"isi file {label} kosong")
+    max_b64_len = (iximport.MAX_ZIP_BYTES * 4) // 3 + 4
+    if len(compact) > max_b64_len:
+        raise ApiError(1000, f"ukuran {label} melebihi batas 50 MB")
+    try:
+        data = base64.b64decode(compact, validate=True)
+    except (ValueError, TypeError):
+        raise ApiError(1000, f"isi file {label} bukan base64 yang valid")
+    if not data:
+        raise ApiError(1000, f"isi file {label} kosong")
+    if len(data) > iximport.MAX_ZIP_BYTES:
+        raise ApiError(1000, f"ukuran {label} melebihi batas 50 MB")
+    return data
+
+
+def _write_temp_import_zip(data):
+    tmp_dir = DATA_DIR / "imports" / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(suffix=".zip", dir=str(tmp_dir))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return Path(tmp_path)
+
+
 @action("profile-import-ixbrowser")
 def profile_import_ixbrowser(params):
-    zip_path = _validate_ixbrowser_zip_path(params.get("path"))
+    raw_path = params.get("path")
+    raw_content = params.get("content_base64")
+    raw_metadata = params.get("metadata_base64")
+    raw_filename = params.get("filename")
+
+    if raw_path is not None and raw_content is not None:
+        raise ApiError(1000, "pilih tepat satu antara path atau content_base64")
+    if raw_path is None and raw_content is None:
+        raise ApiError(1000, "path atau content_base64 wajib diisi")
+
     dry_run = _bool_flag(params.get("dry_run"), default=True)
     update_existing = _bool_flag(params.get("update_existing"), default=False)
+
+    temp_files = []
     try:
-        if dry_run:
-            result = iximport.preview(zip_path)
-            return {**result, "dry_run": True}
-        result = iximport.apply_import(zip_path, update_existing=update_existing)
-    except iximport.IxImportError as error:
-        raise ApiError(1000, str(error))
+        if raw_content is not None:
+            if raw_filename is not None:
+                if not isinstance(raw_filename, str):
+                    raise ApiError(1000, "filename harus berupa string")
+                clean_filename = raw_filename.strip()
+                if clean_filename and not clean_filename.lower().endswith(".zip"):
+                    raise ApiError(1000, "filename harus berakhiran .zip")
+            zip_bytes = _decode_ixbrowser_zip_base64(raw_content, label="zip")
+            zip_path = _write_temp_import_zip(zip_bytes)
+            temp_files.append(zip_path)
+
+            metadata_path = None
+            if raw_metadata is not None:
+                meta_bytes = _decode_ixbrowser_zip_base64(raw_metadata, label="metadata")
+                metadata_path = _write_temp_import_zip(meta_bytes)
+                temp_files.append(metadata_path)
+        else:
+            if raw_metadata is not None:
+                raise ApiError(1000, "metadata_base64 hanya boleh dipakai bersama content_base64")
+            zip_path = _validate_ixbrowser_zip_path(raw_path)
+            metadata_path = None
+
+        try:
+            if dry_run:
+                result = iximport.preview(zip_path, metadata_path=metadata_path)
+                return {**result, "dry_run": True}
+            result = iximport.apply_import(
+                zip_path,
+                update_existing=update_existing,
+                metadata_path=metadata_path,
+            )
+        except iximport.IxImportError as error:
+            raise ApiError(1000, str(error))
+    finally:
+        for tmp_file in temp_files:
+            try:
+                tmp_file.unlink()
+            except OSError:
+                pass
+
     _event(
         "profile-import-ixbrowser",
         f"Impor ixBrowser: {result['created']} dibuat, {result['updated']} diperbarui, "
