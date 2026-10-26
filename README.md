@@ -75,6 +75,9 @@ venv/bin/python scripts/selftest.py
   langsung ditulis ke profil
 - [x] kolom Account di daftar profil, preset platform dipakai bersama oleh
   dialog dan tabel lewat `ui/src/platform.js`
+- [x] impor arsip zip ekspor ixBrowser (file cookie `<serial>_<judul>.txt` dan
+  metadata `excel.xlsx`) lewat CLI `scripts/import-ixbrowser.py` dan action
+  `profile-import-ixbrowser`
 
 ## Pemetaan fingerprint_config ke flag engine
 
@@ -149,6 +152,22 @@ error per nomor baris.
 
 Backend memakai action `profile-import-csv` dengan payload
 `{"text": "<isi file csv>"}`.
+
+## Impor arsip ekspor ixBrowser
+
+Arsip zip hasil ekspor ixBrowser (berisi file cookie `<serial>_<judul>.txt` dan
+metadata `excel.xlsx`) dapat diimpor lewat CLI atau API. Grup `Default Group`
+dipetakan ke grup Default, grup lain dibuat otomatis, platform akun disimpulkan
+dari domain cookie, dan UA mentah disimpan di `fingerprint_config.ua`.
+
+```bash
+./venv/bin/python scripts/import-ixbrowser.py --zip "/path/ke/Export Profiles Cookies.zip"
+./venv/bin/python scripts/import-ixbrowser.py --zip "/path/ke/Export Profiles Cookies.zip" --apply
+./venv/bin/python scripts/import-ixbrowser.py --zip "/path/ke/Export Profiles Cookies.zip" --apply --update-existing
+```
+
+Action API `profile-import-ixbrowser` menerima `{path, dry_run, update_existing}`
+dengan `path` absolut berakhiran `.zip` di bawah direktori home pengguna.
 
 ## Riwayat cek proxy
 

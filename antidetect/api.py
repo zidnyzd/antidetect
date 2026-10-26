@@ -14,6 +14,7 @@ from . import (
     cookies,
     csvimport,
     extensions,
+    iximport,
     launcher,
     passwords,
     profileio,
@@ -549,6 +550,64 @@ def profile_import_csv(params):
         f"{result['created']} profil diimpor dari CSV",
     )
     return result
+
+
+def _bool_flag(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    raise ApiError(1000, "parameter boolean tidak valid")
+
+
+def _validate_ixbrowser_zip_path(raw_path):
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ApiError(1000, "path zip wajib diisi")
+    candidate = Path(raw_path.strip())
+    if not candidate.is_absolute():
+        raise ApiError(1000, "path harus absolut")
+    if candidate.suffix.lower() != ".zip":
+        raise ApiError(1000, "path harus berakhiran .zip")
+    try:
+        resolved = candidate.resolve()
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        raise ApiError(1000, "path tidak valid")
+    if not resolved.is_relative_to(home) or resolved == home:
+        raise ApiError(1000, "path harus berada di bawah direktori home")
+    if resolved.suffix.lower() != ".zip":
+        raise ApiError(1000, "path harus berakhiran .zip")
+    if not resolved.is_file():
+        raise ApiError(1000, "file zip tidak ditemukan")
+    return resolved
+
+
+@action("profile-import-ixbrowser")
+def profile_import_ixbrowser(params):
+    zip_path = _validate_ixbrowser_zip_path(params.get("path"))
+    dry_run = _bool_flag(params.get("dry_run"), default=True)
+    update_existing = _bool_flag(params.get("update_existing"), default=False)
+    try:
+        if dry_run:
+            result = iximport.preview(zip_path)
+            return {**result, "dry_run": True}
+        result = iximport.apply_import(zip_path, update_existing=update_existing)
+    except iximport.IxImportError as error:
+        raise ApiError(1000, str(error))
+    _event(
+        "profile-import-ixbrowser",
+        f"Impor ixBrowser: {result['created']} dibuat, {result['updated']} diperbarui, "
+        f"{result['skipped']} dilewati, {result['cookies']} cookie",
+    )
+    return {**result, "dry_run": False}
 
 
 @action("profile-open")
