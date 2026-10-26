@@ -68,6 +68,13 @@ venv/bin/python scripts/selftest.py
   validasi path dan fallback ke engine bawaan
 - [x] impor profil CSV: satu baris jadi satu profil, grup dan proxy baru
   dibuat otomatis, laporan per baris
+- [x] penyaringan seed: hanya seed dari tabel 4096 yang diukur di engine 150
+  yang dipakai, sehingga lebar teks canvas tidak pernah negatif
+- [x] `profile-update` menggabungkan `preference_config` dan `proxy_config`
+  lama dengan yang baru, bukan menimpanya; `cookie` pada create dan update
+  langsung ditulis ke profil
+- [x] kolom Account di daftar profil, preset platform dipakai bersama oleh
+  dialog dan tabel lewat `ui/src/platform.js`
 
 ## Pemetaan fingerprint_config ke flag engine
 
@@ -197,6 +204,22 @@ nama template maksimal 80 karakter dan harus unik.
 
 Nama template kosong, nama yang sudah dipakai, dan template yang sudah 50 buah
 ditolak dengan kode 1000.
+
+## Seed fingerprint
+
+Engine 150 mengalikan lebar teks `CanvasRenderingContext2D.measureText()` dengan
+faktor noise yang hanya bergantung pada seed. Faktor negatif menghasilkan lebar
+teks negatif, sesuatu yang tidak mungkin terjadi di browser asli.
+
+Tabel `SEED_SAFE_BITMAP` di `antidetect/launcher.py` diisi dari pengukuran
+nyata: 4096 seed pada rentang `1_000_000_000` sampai `1_000_000_000 + 4095`,
+dengan 2093 seed aman (51,1 persen) dan 14 seed di antaranya diukur ulang.
+`rand_seed()` hanya memilih dari seed yang aman, dan `seed_is_safe()` menganggap
+seed di luar rentang tabel belum terverifikasi.
+
+Konsekuensinya, seed baru hanya berasal dari 2093 nilai. Untuk 100 profil,
+peluang ada dua profil memakai seed yang sama sekitar 9 persen. Memperluas
+rentang berarti mengukur blok baru dan memperbarui tabel, bukan menebak.
 
 ## Yang belum didukung engine
 
