@@ -309,7 +309,10 @@ def update_profile(conn, profile_id, data):
         if data.get(key) is not None:
             fields.append(f"{key} = ?")
             args.append(json.dumps(data[key]))
-    if "proxy_key" in data:
+    if data.get("proxy_config") is not None:
+        fields.append("proxy_key = ?")
+        args.append(data.get("proxy_key") or proxy_key_for(data["proxy_config"]))
+    elif "proxy_key" in data:
         fields.append("proxy_key = ?")
         args.append(data["proxy_key"])
     tag_source = next((key for key in ("tab_id", "tag_id", "tag_ids") if key in data), None)

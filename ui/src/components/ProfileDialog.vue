@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api'
+import { ACCOUNT_PRESETS, CUSTOM_SITE_ID, accountKey } from '../platform'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -118,17 +119,6 @@ const WEBRTC_OPTIONS = [
   },
   { value: 4, label: 'Matikan UDP', hint: 'UDP non-proxy diblokir supaya IP tidak bocor' },
 ]
-const CUSTOM_SITE_ID = 22
-const ACCOUNT_PRESETS = [
-  { key: 'Facebook', site_id: 1, site_url: 'https://www.facebook.com/' },
-  { key: 'TikTok', site_id: 2, site_url: 'https://www.tiktok.com/' },
-  { key: 'Instagram', site_id: 3, site_url: 'https://www.instagram.com/' },
-  { key: 'Shopee', site_id: 4, site_url: 'https://shopee.co.id/' },
-  { key: 'Tokopedia', site_id: 5, site_url: 'https://www.tokopedia.com/' },
-  { key: 'Google', site_id: 6, site_url: 'https://www.google.com/' },
-  { key: 'Lazada', site_id: 7, site_url: 'https://www.lazada.co.id/' },
-]
-
 const activeTab = ref('account')
 const busy = ref(false)
 const seedBusy = ref(false)
@@ -225,25 +215,8 @@ function spoofingValues(raw) {
   return SPOOFING_VALUES.filter((name) => chosen.includes(name))
 }
 
-function hostOf(value) {
-  try {
-    const parsed = new URL(String(value || ''))
-    return parsed.hostname.replace(/^www\./, '').toLowerCase()
-  } catch {
-    return ''
-  }
-}
-
 function presetFor(siteId, siteUrl) {
-  const id = Number(siteId)
-  const host = hostOf(siteUrl)
-  const byId = ACCOUNT_PRESETS.find((preset) => preset.site_id === id)
-  if (byId && (!host || host === hostOf(byId.site_url))) return byId.key
-  if (host) {
-    const byUrl = ACCOUNT_PRESETS.find((preset) => hostOf(preset.site_url) === host)
-    if (byUrl) return byUrl.key
-  }
-  return 'Custom'
+  return accountKey(siteId, siteUrl)
 }
 
 function applyAccountPreset(key) {

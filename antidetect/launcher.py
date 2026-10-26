@@ -44,6 +44,37 @@ DISABLE_SPOOFING_VALUES = ("font", "audio", "canvas", "clientrects", "gpu")
 DISABLE_SPOOFING_EFFECTIVE = ("canvas", "gpu")
 WEBRTC_MODES = (0, 1, 2, 3, 4)
 
+# Engine 150 mengalikan lebar teks canvas dengan faktor noise yang hanya
+# bergantung pada seed. Faktor negatif menghasilkan lebar font negatif,
+# sesuatu yang mustahil terjadi di browser asli.
+# Tabel di bawah diisi dari pengukuran nyata pada engine 150: bit ke-i
+# menandai seed SEED_SAFE_BASE + i yang menghasilkan faktor nonnegatif.
+# Batasnya: tabel hanya berlaku untuk seed di dalam rentang tersebut dan
+# untuk engine 150, di luar itu seed dianggap belum terverifikasi.
+SEED_SAFE_BASE = 1_000_000_000
+SEED_SAFE_COUNT = 4096
+SEED_SAFE_BITMAP = (
+    "d1d406a001e5c239389ca55fd40c542ed1a57c2e417395764c9b95376d2b75fa9a92bf34b8c83fe9332624b28d011200"
+    "1116d4d98b699643047fb8980237fd20420f06c311f0f87d559de725bfa50bc9d62b5d020d1f4c1b79aeb3348bd12259"
+    "5712a5f63bb7f7a5073cc7d4b7a617b3a5d47a1f829b30b60f2ed5e4fb99b046cbef585e958e7d2e0a59be1b94fe3046"
+    "17e99b7679e542c6c7bf537291e06a32eb9ea6af2deedaad782b4170ea746781aa58b62d55abff18ac76d464cd5ec47c"
+    "0edb7d5f0aa9e85cccb532e6699351a0f5af4273bffa414664f850c9b2cd343cbc591aad0a8b4a3f99ae5b892967d968"
+    "d45abe7dbceb47f4b315170f8dd2c61ce9ca3f261cbfd0615915370785fbaa79a954a0d8842fad684b102e1ebd96c4ce"
+    "a5e6c3d40f73745e481a37bff7beaf9548cea78d8367e6c3e84719907c0db69cb61cc4854885242491556f5008e0318e"
+    "825405df56c3ef4c8cc2ce1989f3d8877f47af75cd3c172892968483072fed69dd1ffae9bc7b213b107bab0245c79bd9"
+    "491548b5fdaf92af67850fe678a56d316fce30f7e5b139809ce53a91ea8fbb82a1ca4d0e053e7260e7dae94a61386304"
+    "afff889ffab565b6d681f599cf268487cf927e17da63cfaada38d10b905362743748b493893ff2625bbca04cabd21d5f"
+    "d8a9907487f67d95b48b4bf6d84bce785cb59ca70207e78294bed1949fc05782"
+)
+
+SEED_SAFE_BYTES = bytes.fromhex(SEED_SAFE_BITMAP)
+SEED_SAFE_COUNT = min(SEED_SAFE_COUNT, len(SEED_SAFE_BYTES) * 8)
+SEED_SAFE_INDEXES = tuple(
+    index
+    for index in range(SEED_SAFE_COUNT)
+    if SEED_SAFE_BYTES[index // 8] & (1 << (index % 8))
+)
+
 _open = {}
 _flag_cache = {}
 
@@ -405,7 +436,20 @@ def normalize_proxy_extraction_method(value):
     return text if text in ("invalid", "every_type", "handle") else value
 
 
-def _preference_args(preferences):
+def validate_proxy(proxy):
+    """Normalisasi field proxy yang punya dua konvensi nilai."""
+    if not isinstance(proxy, dict):
+        return proxy
+    if "use_system_proxy" in proxy:
+        proxy["use_system_proxy"] = normalize_use_system_proxy(proxy["use_system_proxy"])
+    if "proxy_extraction_method" in proxy:
+        proxy["proxy_extraction_method"] = normalize_proxy_extraction_method(
+            proxy["proxy_extraction_method"]
+        )
+    return proxy
+
+
+def _preference_args(preferences, binary=None):
     args = []
     if not isinstance(preferences, dict):
         return args
@@ -433,13 +477,33 @@ def _preference_args(preferences):
         pass
     if _flag_enabled(preferences.get("open_devtools")):
         args.append("--auto-open-devtools-for-tabs")
-    if _int_preference(preferences.get("block_permission_requests")) == 1:
+    if _flag_enabled(preferences.get("block_permission_requests")) and flag_supported(
+        "deny-permission-prompts", binary
+    ):
         args.append("--deny-permission-prompts")
     return args
 
 
+def seed_is_safe(seed):
+    """True kalau seed terverifikasi menghasilkan faktor noise nonnegatif.
+
+    Sumber kebenaran adalah tabel hasil pengukuran pada engine 150. Seed
+    di luar rentang tabel belum terverifikasi dan dianggap tidak aman.
+    """
+    number = _int_preference(seed)
+    if number is None:
+        return False
+    index = number - SEED_SAFE_BASE
+    if index < 0 or index >= SEED_SAFE_COUNT:
+        return False
+    return bool(SEED_SAFE_BYTES[index // 8] & (1 << (index % 8)))
+
+
 def rand_seed():
-    return secrets.randbelow(2**31 - 1) + 1
+    """Seed acak dari subset yang terverifikasi tidak menghasilkan lebar negatif."""
+    if not SEED_SAFE_INDEXES:
+        raise LaunchError("tabel seed aman kosong, engine tidak bisa dipakai")
+    return SEED_SAFE_BASE + SEED_SAFE_INDEXES[secrets.randbelow(len(SEED_SAFE_INDEXES))]
 
 
 def _free_port():
@@ -538,7 +602,7 @@ def _gpu_args(fp, binary=None):
 
 
 def _proxy_spec(profile):
-    proxy = profile.get("proxy_config") or {}
+    proxy = validate_proxy(profile.get("proxy_config") or {})
     proxy_type = str(proxy.get("proxy_type") or "direct").lower()
     host, port = proxy.get("proxy_ip"), proxy.get("proxy_port")
     if proxy_type in ("direct", "", "none") or not host or not port:
@@ -619,6 +683,7 @@ def stop_proxy_bridge(proc):
 
 def build_args(profile, port, app_args=None, proxy_arg=None, data_dir=None):
     fp = profile.get("fingerprint_config") or {}
+    validate_fingerprint(fp)
     binary = kernel_for(profile)
     if data_dir is None:
         data_dir = PROFILES_DIR / str(profile["id"]) / "data"
@@ -659,7 +724,7 @@ def build_args(profile, port, app_args=None, proxy_arg=None, data_dir=None):
     args.extend(_gpu_args(fp, binary))
 
     preferences = profile.get("preference_config") or {}
-    args.extend(_preference_args(preferences))
+    args.extend(_preference_args(preferences, binary))
 
     extension_ids = preferences.get("extension_ids")
     if extension_ids and not os.environ.get("ANTIDETECT_NO_EXTENSIONS"):
@@ -869,29 +934,6 @@ def _state_payload(profile_id):
     payload["instances"] = instances
     return payload
 
-def _screen_areas():
-    """Daftar area layar dari xrandr sebagai (x, y, lebar, tinggi)."""
-    try:
-        result = subprocess.run(
-            ["xrandr", "--query"], capture_output=True, text=True, timeout=5
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    areas = []
-    for line in (result.stdout or "").splitlines():
-        if " connected" not in line:
-            continue
-        found = re.search(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", line)
-        if found:
-            areas.append(
-                (
-                    int(found.group(3)),
-                    int(found.group(4)),
-                    int(found.group(1)),
-                    int(found.group(2)),
-                )
-            )
-    return areas
 
 def open_profile(profile, app_args=None):
     profile_id = profile["id"]
@@ -914,7 +956,10 @@ def open_profile(profile, app_args=None):
                 proxy_arg = f"{spec['scheme']}://{spec['host']}:{spec['port']}"
 
         port = _free_port()
-        args = build_args(profile, port, app_args, proxy_arg=proxy_arg, data_dir=data_dir)
+        try:
+            args = build_args(profile, port, app_args, proxy_arg=proxy_arg, data_dir=data_dir)
+        except PreferenceError as error:
+            raise LaunchError(str(error)) from error
         log_path = PROFILES_DIR / str(profile_id) / "chrome.log"
         log = open(log_path, "ab")
         env = os.environ.copy()
@@ -998,6 +1043,43 @@ def _arrange_number(params, key, default, minimum=None):
     return number
 
 
+def _arrange_param(params, keys, default, minimum=None):
+    """Ambil angka tata letak dari nama pertama yang ada di payload.
+
+    Bundle dan kode lama memakai ejaan berbeda untuk beberapa parameter,
+    jadi semua ejaan yang dikenal diterima.
+    """
+    for key in keys:
+        if key in params:
+            return _arrange_number(params, key, default, minimum)
+    return default
+
+
+def _screen_areas():
+    """Daftar area layar dari xrandr sebagai (x, y, lebar, tinggi)."""
+    try:
+        result = subprocess.run(
+            ["xrandr", "--query"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    areas = []
+    for line in (result.stdout or "").splitlines():
+        if " connected" not in line:
+            continue
+        found = re.search(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", line)
+        if found:
+            areas.append(
+                (
+                    int(found.group(3)),
+                    int(found.group(4)),
+                    int(found.group(1)),
+                    int(found.group(2)),
+                )
+            )
+    return areas
+
+
 def _window_ids(pid):
     try:
         found = subprocess.run(
@@ -1028,22 +1110,33 @@ def arrange_opened_profiles(params=None):
     """Tile open profile windows with wmctrl. A profile counts once when a
     visible window of its Chrome pid accepts the geometry change."""
     params = params or {}
-    per_line = _arrange_number(params, "per_line_number_of_profiles", 3, 1)
-    width = _arrange_number(params, "profile_size_width", 960, 1)
-    height = _arrange_number(params, "profile_size_hight", 540, 1)
-    spacing_h = _arrange_number(params, "profile_spacing_horizontal", 8, 0)
-    spacing_v = _arrange_number(params, "profile_spacing_vertical", 8, 0)
-    start_x = _arrange_number(params, "starting_position_x", 0)
-    start_y = _arrange_number(params, "starting_position_y", 0)
+    per_line = _arrange_param(params, ("per_line_number_of_profiles",), 3, 1)
+    width = _arrange_param(params, ("profile_size_width",), 960, 1)
+    height = _arrange_param(params, ("profile_size_hight",), 540, 1)
+    spacing_h = _arrange_param(
+        params, ("profile_spacing_horizontal", "profile_spaceing_horizontal"), 8, 0
+    )
+    spacing_v = _arrange_param(
+        params, ("profile_spacing_vertical", "profile_spaceing_vertical"), 8, 0
+    )
+    start_x = _arrange_param(params, ("starting_position_x",), 0)
+    start_y = _arrange_param(params, ("starting_position_y",), 0)
     # The bundle spells it profile_deviation_x; the earlier API used a typo.
-    deviation_x = _arrange_number(params, "profile_deviation_x", None)
-    if deviation_x is None:
-        deviation_x = _arrange_number(params, "profile_deviaton_x", 0)
-    deviation_y = _arrange_number(params, "profile_deviation_y", None)
-    if deviation_y is None:
-        deviation_y = _arrange_number(params, "profile_deviaton_y", 0)
-    layout = _arrange_number(params, "layout", 1)
-    adaptive = _arrange_number(params, "adaptive", 0)
+    deviation_x = _arrange_param(params, ("profile_deviation_x", "profile_deviaton_x"), 0)
+    deviation_y = _arrange_param(params, ("profile_deviation_y", "profile_deviaton_y"), 0)
+    layout = _arrange_param(params, ("layout",), 1)
+    adaptive = _arrange_param(params, ("adaptive",), 0)
+    screen = _arrange_param(params, ("screen",), 0, 0)
+
+    origin_x = 0
+    origin_y = 0
+    if adaptive == 1:
+        areas = _screen_areas()
+        if areas:
+            index = min(screen, len(areas) - 1)
+            origin_x, origin_y, area_w, area_h = areas[index]
+            width = min(width, area_w)
+            height = min(height, area_h)
 
     arranged = 0
     for index, info in enumerate(opened_profiles()):
@@ -1059,11 +1152,8 @@ def arrange_opened_profiles(params=None):
             x = start_x + index * deviation_x
             y = start_y + index * deviation_y
         else:
-            x = start_x + column * (width + spacing_h + deviation_x)
-            y = start_y + row * (height + spacing_v + deviation_y)
-        if adaptive == 1:
-            x = start_x
-            y = start_y
+            x = origin_x + start_x + column * (width + spacing_h + deviation_x)
+            y = origin_y + start_y + row * (height + spacing_v + deviation_y)
         for window_id in window_ids:
             if _move_window(window_id, x, y, width, height):
                 arranged += 1

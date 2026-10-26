@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Brush, Connection, CopyDocument, Delete, Document, Download, Edit, Files, FolderOpened, Grid, Key, Lock, Menu, MoreFilled, Plus, Refresh, Search, Star, Upload } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useOnRefresh } from '../refresh'
+import { accountSummary } from '../platform'
 import ProfileDialog from '../components/ProfileDialog.vue'
 import CookieDialog from '../components/CookieDialog.vue'
 import BookmarkDialog from '../components/BookmarkDialog.vue'
@@ -14,19 +15,32 @@ import GroupManager from '../components/GroupManager.vue'
 
 const POOL_LIMIT = 1000
 const COLUMN_STORAGE_KEY = 'antidetect.profiles.columns'
+const COLUMN_VERSION_KEY = 'antidetect.profiles.columns.version'
+const COLUMN_VERSION = 2
 const COLUMN_OPTIONS = [
-  { key: 'name', label: 'Nama' },
+  { key: 'name', label: 'Nama Profil' },
   { key: 'group', label: 'Grup' },
   { key: 'tag', label: 'Tag' },
   { key: 'platform', label: 'Platform' },
   { key: 'proxy', label: 'Proxy' },
+  { key: 'account', label: 'Account' },
   { key: 'status', label: 'Status' },
   { key: 'created', label: 'Dibuat' },
   { key: 'last_open', label: 'Terakhir Dibuka' },
   { key: 'note', label: 'Catatan' },
   { key: 'process', label: 'Waktu Proses' },
 ]
-const DEFAULT_COLUMNS = ['name', 'group', 'tag', 'platform', 'proxy', 'status', 'created', 'last_open']
+const DEFAULT_COLUMNS = [
+  'name',
+  'group',
+  'tag',
+  'platform',
+  'proxy',
+  'account',
+  'status',
+  'created',
+  'last_open',
+]
 
 function orderColumns(keys) {
   return COLUMN_OPTIONS.map((column) => column.key).filter((key) => keys.includes(key))
@@ -36,6 +50,14 @@ function loadVisibleColumns() {
   try {
     const saved = JSON.parse(localStorage.getItem(COLUMN_STORAGE_KEY) || '')
     if (!Array.isArray(saved)) return [...DEFAULT_COLUMNS]
+    const version = Number(localStorage.getItem(COLUMN_VERSION_KEY) || 0)
+    if (version < COLUMN_VERSION) {
+      // Kolom baru masuk daftar bawaan, pilihan lama tetap dihormati.
+      const merged = orderColumns([...saved, ...DEFAULT_COLUMNS])
+      localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(merged))
+      localStorage.setItem(COLUMN_VERSION_KEY, String(COLUMN_VERSION))
+      return merged
+    }
     return orderColumns(saved)
   } catch {
     return [...DEFAULT_COLUMNS]
@@ -255,11 +277,13 @@ function toggleColumn(key) {
     : [...visibleColumns.value, key]
   visibleColumns.value = orderColumns(next)
   localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(visibleColumns.value))
+  localStorage.setItem(COLUMN_VERSION_KEY, String(COLUMN_VERSION))
 }
 
 function showAllColumns() {
   visibleColumns.value = [...DEFAULT_COLUMNS]
   localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(DEFAULT_COLUMNS))
+  localStorage.setItem(COLUMN_VERSION_KEY, String(COLUMN_VERSION))
 }
 
 function onPageChange(value) {
@@ -920,6 +944,15 @@ function proxyTypeLabel(profile) {
   return type.toUpperCase()
 }
 
+function accountLabel(profile) {
+  return accountSummary(profile).label
+}
+
+function accountHost(profile) {
+  const summary = accountSummary(profile)
+  return summary.detail || ''
+}
+
 function proxyHostLabel(profile) {
   const config = profile.proxy_config || {}
   const type = String(config.proxy_type || 'direct').toLowerCase()
@@ -1148,7 +1181,7 @@ useOnRefresh(() => refreshAll())
         </el-table-column>
         <el-table-column
           v-if="isColumnVisible('name')"
-          label="Nama"
+          label="Nama Profil"
           prop="name"
           min-width="150"
           sortable="custom"
@@ -1194,6 +1227,14 @@ useOnRefresh(() => refreshAll())
             <div class="cell-stack">
               <span class="cell-main">{{ proxyTypeLabel(row) }}</span>
               <span class="cell-sub" :title="proxyHostLabel(row)">{{ proxyHostLabel(row) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="isColumnVisible('account')" label="Account" width="130">
+          <template #default="{ row }">
+            <div class="cell-stack">
+              <span class="cell-main" :title="accountLabel(row)">{{ accountLabel(row) }}</span>
+              <span v-if="accountHost(row)" class="cell-sub">{{ accountHost(row) }}</span>
             </div>
           </template>
         </el-table-column>

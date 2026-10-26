@@ -159,6 +159,84 @@ def _proxy_key(proxy_config):
     return store.proxy_key_for(proxy_config)
 
 
+PROXY_EXTRA_FIELDS = ("use_system_proxy", "proxy_extraction_method")
+
+
+def _apply_proxy_fields(params):
+    """Field proxy yang datang di luar proxy_config dipindah ke proxy_config."""
+    has_extra = any(field in params for field in PROXY_EXTRA_FIELDS)
+    if "proxy_config" not in params and not has_extra:
+        return
+    config = params.get("proxy_config")
+    if config is None:
+        config = {}
+    if not isinstance(config, dict):
+        raise ApiError(1000, "proxy_config harus berupa objek")
+    for field in PROXY_EXTRA_FIELDS:
+        if field in params and field not in config:
+            config[field] = params[field]
+    params["proxy_config"] = config
+
+
+def _merge_preferences(stored, incoming):
+    """Gabungkan preference_config lama dan baru, lalu normalkan."""
+    if not isinstance(incoming, dict):
+        raise ApiError(1000, "preference_config harus berupa objek")
+    merged = dict(stored) if isinstance(stored, dict) else {}
+    merged.update(incoming)
+    try:
+        launcher.validate_preferences(merged)
+    except launcher.PreferenceError as error:
+        raise ApiError(1000, str(error))
+    return merged
+
+
+def _merge_proxy(stored, incoming, params):
+    """Gabungkan proxy_config lama dan baru, termasuk field tambahan."""
+    config = dict(stored) if isinstance(stored, dict) else {}
+    if incoming is not None:
+        if not isinstance(incoming, dict):
+            raise ApiError(1000, "proxy_config harus berupa objek")
+        for key, value in incoming.items():
+            if value is None:
+                config.pop(key, None)
+            else:
+                config[key] = value
+    for field in PROXY_EXTRA_FIELDS:
+        if field in params and field not in config:
+            config[field] = params[field]
+    if str(config.get("proxy_type") or "direct").strip().lower() == "direct":
+        # Proxy direct tidak menyimpan alamat, supaya tidak dipakai lagi.
+        for field in ("proxy_ip", "proxy_port", "proxy_user", "proxy_password"):
+            config.pop(field, None)
+    return config
+
+
+def _prepare_profile(params, stored=None):
+    """Siapkan payload profil: preference dinormalisasi, proxy digabung."""
+    payload = dict(params)
+    preferences = payload.get("preference_config")
+    if preferences is not None:
+        old = stored.get("preference_config") if isinstance(stored, dict) else None
+        payload["preference_config"] = _merge_preferences(old, preferences)
+    _apply_proxy_fields(payload)
+    if "proxy_config" in payload:
+        old_proxy = stored.get("proxy_config") if isinstance(stored, dict) else None
+        payload["proxy_config"] = _merge_proxy(old_proxy, payload["proxy_config"], payload)
+        payload["proxy_key"] = _proxy_key(payload["proxy_config"])
+    return payload
+
+
+def _apply_cookie(profile_id, cookie):
+    """Simpan cookie profil. Kegagalan menulis tidak menggagalkan aksi lain."""
+    if cookie in (None, "", []):
+        return
+    try:
+        cookies.update_cookies(profile_id, cookie)
+    except cookies.CookieError as error:
+        _event("cookie-simpan", f"Cookie profil #{profile_id} gagal disimpan: {error}", profile_id)
+
+
 def _normalize_profile_payload(data):
     """Normalise the fields whose value conventions differ between SDK and bundle."""
     payload = dict(data)
@@ -308,14 +386,16 @@ def profile_logs(params):
 
 @action("profile-create")
 def profile_create(params):
-    _check_kernel_path(params)
-    _check_preferences(params)
-    _check_fingerprint(params)
     _validate_cookie_payload(params.get("cookie"))
-    payload = _normalize_profile_payload(params)
+    payload = _prepare_profile(params)
+    _check_kernel_path(payload)
+    _check_preferences(payload)
+    _check_fingerprint(payload)
+    payload = _normalize_profile_payload(payload)
     with store.db() as conn:
         pid = store.create_profile(conn, payload)
         name = _profile_name(conn, pid)
+    _apply_cookie(pid, params.get("cookie"))
     _event("profile-create", f'Profil "{_event_name(name)}" dibuat', pid)
     return {"profile_id": pid, "new_profile_id": pid}
 
@@ -323,14 +403,19 @@ def profile_create(params):
 @action("profile-update")
 def profile_update(params):
     pid = _pid(params)
-    _check_kernel_path(params)
-    _check_preferences(params)
-    _check_fingerprint(params)
-    payload = _normalize_profile_payload(params)
+    _validate_cookie_payload(params.get("cookie"))
     with store.db() as conn:
-        _active_profile(conn, pid)
+        row = _active_profile(conn, pid)
+        stored = store.profile_to_dict(row)
+    payload = _prepare_profile(params, stored)
+    _check_kernel_path(payload)
+    _check_preferences(payload)
+    _check_fingerprint(payload)
+    payload = _normalize_profile_payload(payload)
+    with store.db() as conn:
         store.update_profile(conn, pid, payload)
         name = conn.execute("SELECT name FROM profiles WHERE id = ?", (pid,)).fetchone()["name"]
+    _apply_cookie(pid, params.get("cookie"))
     _event("profile-update", f'Profil "{_event_name(name)}" diperbarui', pid)
     return True
 
@@ -1395,11 +1480,14 @@ _busy = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
 class Handler(BaseHTTPRequestHandler):
     server_version = "antidetect/0.1"
 
+    def _route(self):
+        return urlsplit(self.path).path
+
     def do_POST(self):
-        if not self.path.startswith("/api/v2/"):
+        if not self._route().startswith("/api/v2/"):
             self._json(404, {"error": {"code": 404, "message": "not found"}})
             return
-        name = self.path[len("/api/v2/"):].strip("/")
+        name = self._route()[len("/api/v2/"):].strip("/")
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:
@@ -1433,16 +1521,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
 
     def do_GET(self):
-        if self.path in ("/", "/health"):
+        if self._route() in ("/", "/health"):
             self._json(200, {"status": "ok", "open": len(launcher.opened_profiles())})
             return
-        if self.path.startswith("/api/v2/"):
+        if self._route().startswith("/api/v2/"):
             self._json(200, {"error": {"code": 1007, "message": "Gunakan metode POST."}})
             return
         self._json(404, {"error": {"code": 404, "message": "not found"}})
 
     def do_HEAD(self):
-        if self.path.startswith("/api/v2/"):
+        if self._route().startswith("/api/v2/"):
             self._json(200, {"error": {"code": 1007, "message": "Gunakan metode POST."}})
             return
         self._json(404, {"error": {"code": 404, "message": "not found"}})
