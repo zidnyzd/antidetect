@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote
 
-from . import extensions
+from . import extensions, store, sync_agent
 from .paths import DATA_DIR
 
 ENGINE_DIR = Path(
@@ -203,7 +203,10 @@ def kernel_for(profile):
 
 
 class LaunchError(Exception):
-    pass
+    def __init__(self, message, code=1003, data=None):
+        super().__init__(message)
+        self.code = code
+        self.data = data
 
 
 class PreferenceError(Exception):
@@ -836,6 +839,21 @@ def _process_gone(proc, pid):
     return False
 
 
+def _release_profile_lease(profile_id, info=None):
+    profile_uuid = (info or {}).get("uuid") if isinstance(info, dict) else None
+    lease_token = (info or {}).get("lease_token") if isinstance(info, dict) else None
+    try:
+        with store.db() as conn:
+            if not profile_uuid and profile_id is not None:
+                row = store.profile_get(conn, profile_id)
+                if row and "uuid" in row.keys():
+                    profile_uuid = row["uuid"]
+            if profile_uuid:
+                sync_agent.release_lease(conn, profile_uuid, lease_token=lease_token)
+    except Exception:
+        pass
+
+
 def _prune_entry(profile_id, entry):
     instances = entry.get("instances")
     if instances is not None:
@@ -853,16 +871,20 @@ def _prune_entry(profile_id, entry):
             _write_state(profile_id, _state_payload(profile_id))
             return True
         else:
+            info = entry.get("info") or {}
             _open.pop(profile_id, None)
             _clear_state(profile_id)
+            _release_profile_lease(profile_id, info)
             return False
     else:
         proc = entry.get("proc")
-        pid = int(entry.get("info", {}).get("pid") or 0)
+        info = entry.get("info") or {}
+        pid = int(info.get("pid") or 0)
         if _process_gone(proc, pid):
-            _stop_gost(entry.get("info") or {})
+            _stop_gost(info)
             _open.pop(profile_id, None)
             _clear_state(profile_id)
+            _release_profile_lease(profile_id, info)
             return False
         return True
 
@@ -1015,10 +1037,36 @@ def _state_payload(profile_id):
     return payload
 
 
-def open_profile(profile, app_args=None):
+def open_profile(profile, app_args=None, force_lease=False):
     profile_id = profile["id"]
     if is_open(profile_id) and not _multi_instance_enabled(profile):
         return _open[profile_id]["info"]
+
+    profile_uuid = profile.get("uuid")
+    if not profile_uuid and profile_id is not None:
+        try:
+            with store.db() as conn:
+                row = store.profile_get(conn, profile_id)
+                if row and "uuid" in row.keys():
+                    profile_uuid = row["uuid"]
+        except Exception:
+            profile_uuid = None
+
+    lease_info = None
+    if profile_uuid:
+        try:
+            with store.db() as conn:
+                lease_info = sync_agent.acquire_lease(
+                    conn, profile_uuid, force=bool(force_lease)
+                )
+        except sync_agent.SyncLeaseError as error:
+            holder_name = (error.data or {}).get("holder_device_name")
+            msg = (
+                f"Profil sedang dibuka di perangkat {holder_name}"
+                if holder_name
+                else str(error)
+            )
+            raise LaunchError(msg, code=1009, data=error.data) from error
 
     spec = _proxy_spec(profile)
     gost_proc = None
@@ -1056,10 +1104,16 @@ def open_profile(profile, app_args=None):
         if gost_proc is not None:
             _kill_pgid(gost_proc.pid, timeout=5.0)
         _clear_state(profile_id)
+        if profile_uuid and isinstance(lease_info, dict) and lease_info.get("lease_token"):
+            _release_profile_lease(
+                profile_id,
+                {"uuid": profile_uuid, "lease_token": lease_info.get("lease_token")},
+            )
         raise
 
     info = {
         "profile_id": profile_id,
+        "uuid": profile_uuid,
         "pid": proc.pid,
         "debugging_address": f"127.0.0.1:{port}",
         "webdriver": str(CHROMEDRIVER),
@@ -1068,6 +1122,9 @@ def open_profile(profile, app_args=None):
         "gost_pid": gost_proc.pid if gost_proc else None,
         "data_dir": str(data_dir) if data_dir else str(PROFILES_DIR / str(profile_id) / "data"),
         "instance": instance_index,
+        "lease_token": lease_info.get("lease_token") if isinstance(lease_info, dict) else None,
+        "fencing_token": int(lease_info.get("fencing_token") or 0) if isinstance(lease_info, dict) else 0,
+        "expires_at": lease_info.get("expires_at") if isinstance(lease_info, dict) else None,
     }
     if _multi_instance_enabled(profile):
         # Several instances may run, so keep them all in a list per profile.
@@ -1084,6 +1141,7 @@ def close_profile(profile_id):
     entry = _open.pop(profile_id, None)
     info = entry["info"] if entry else _read_state(profile_id)
     if not info:
+        _release_profile_lease(profile_id)
         return False
     instances = entry.get("instances") if entry else None
     if instances:
@@ -1096,6 +1154,7 @@ def close_profile(profile_id):
             _stop_gost(item_info)
             closed += 1
         _clear_state(profile_id)
+        _release_profile_lease(profile_id, info)
         return closed > 0
     proc = entry["proc"] if entry else None
     pid = int(info.get("pid") or 0)
@@ -1103,6 +1162,7 @@ def close_profile(profile_id):
         _kill_pgid(pid)
     _stop_gost(info)
     _clear_state(profile_id)
+    _release_profile_lease(profile_id, info)
     return True
 
 
@@ -1257,3 +1317,4 @@ def forget(profile_id):
         if not pid or _process_gone(None, pid):
             _stop_gost(info)
     _clear_state(profile_id)
+    _release_profile_lease(profile_id, info)

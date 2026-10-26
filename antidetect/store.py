@@ -469,6 +469,7 @@ def profile_to_dict(row, include_seed=True):
     proxy_config = _loads(row["proxy_config"])
     data = {
         "profile_id": row["id"],
+        "uuid": _row_val(row, "uuid"),
         "name": row["name"],
         "group_id": row["group_id"],
         "color": row["color"],

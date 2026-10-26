@@ -22,6 +22,7 @@ from . import (
     proxycheck,
     proxytext,
     store,
+    sync_agent,
     templates,
 )
 from .paths import DATA_DIR
@@ -480,6 +481,7 @@ def profile_copy(params):
         source = row["name"]
         data = store.profile_to_dict(row)
         data.pop("profile_id")
+        data.pop("uuid", None)
         data.pop("seed", None)
         data["name"] = params.get("name") or f"{row['name']} copy"
         new_id = store.create_profile(conn, data)
@@ -701,14 +703,23 @@ def profile_import_ixbrowser(params):
 @action("profile-open")
 def profile_open(params):
     pid = _pid(params)
+    force_raw = params.get("force_lease") if "force_lease" in params else params.get("force")
+    force_lease = _bool_flag(force_raw, default=False)
     with store.db() as conn:
         row = _active_profile(conn, pid)
         profile = store.profile_to_dict(row, include_seed=True)
         name = row["name"]
     profile["id"] = pid
     try:
-        result = launcher.open_profile(profile, app_args=params.get("args"))
+        result = launcher.open_profile(
+            profile, app_args=params.get("args"), force_lease=force_lease
+        )
+    except sync_agent.SyncLeaseError as error:
+        raise ApiError(1009, str(error))
     except launcher.LaunchError as error:
+        err_code = getattr(error, "code", None)
+        if err_code == 1009 or "sedang dibuka di perangkat" in str(error):
+            raise ApiError(1009, str(error))
         raise ApiError(1003, str(error))
     with store.db() as conn:
         store.mark_opened(conn, pid)
@@ -719,6 +730,8 @@ def profile_open(params):
 @action("profile-open-with-random-fingerprint")
 def profile_open_random(params):
     pid = _pid(params)
+    force_raw = params.get("force_lease") if "force_lease" in params else params.get("force")
+    force_lease = _bool_flag(force_raw, default=False)
     with store.db() as conn:
         row = _active_profile(conn, pid)
         name = row["name"]
@@ -736,8 +749,15 @@ def profile_open_random(params):
         profile["seed"] = store.latest_seed(conn, pid)
     profile["id"] = pid
     try:
-        result = launcher.open_profile(profile, app_args=params.get("args"))
+        result = launcher.open_profile(
+            profile, app_args=params.get("args"), force_lease=force_lease
+        )
+    except sync_agent.SyncLeaseError as error:
+        raise ApiError(1009, str(error))
     except launcher.LaunchError as error:
+        err_code = getattr(error, "code", None)
+        if err_code == 1009 or "sedang dibuka di perangkat" in str(error):
+            raise ApiError(1009, str(error))
         raise ApiError(1003, str(error))
     with store.db() as conn:
         store.mark_opened(conn, pid)
@@ -922,7 +942,15 @@ def native_opened_list(params):
 
 @action("profile-open-state-reset")
 def profile_open_state_reset(params):
-    launcher.forget(_pid(params))
+    pid = _pid(params)
+    launcher.forget(pid)
+    with store.db() as conn:
+        row = store.profile_get(conn, pid)
+        if row and "uuid" in row.keys() and row["uuid"]:
+            try:
+                sync_agent.release_lease(conn, row["uuid"], force=True)
+            except Exception:
+                pass
     return True
 
 
@@ -1705,6 +1733,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(host="127.0.0.1", port=53200):
     store.init()
+    sync_agent.start_heartbeat()
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"antidetect API listening on http://{host}:{port}/api/v2/")
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    finally:
+        sync_agent.stop_heartbeat()

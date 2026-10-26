@@ -1,4 +1,4 @@
-"""Tes otomatis end-to-end untuk sinkronisasi Fase 1 tanpa menjalankan engine Chrome."""
+"""Tes otomatis end-to-end untuk sinkronisasi Fase 1 dan Fase 2 tanpa menjalankan engine Chrome."""
 import json
 import os
 from pathlib import Path
@@ -7,6 +7,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
+from unittest import mock
 
 SCRATCH_ROOT = Path("/home/zdna/.hermes/cache/scratch/antigravity")
 SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
@@ -16,7 +18,7 @@ os.environ["ANTIDETECT_HOME"] = str(WORK_DIR / "default_home")
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from antidetect import store, sync_agent, sync_crypto, sync_server  # noqa: E402
+from antidetect import api, launcher, store, sync_agent, sync_crypto, sync_server  # noqa: E402
 
 LEGACY_SCHEMA = """
 CREATE TABLE profiles (
@@ -511,16 +513,293 @@ def test_2_and_3_and_4():
                 indent=2,
             )
         )
+
+        print("=== Tes 5: Distributed Profile Lease ===")
+        profile_uuid = prof_off_row["uuid"]
+        pid_a_off = prof_off_row["id"]
+        pid_b_off = prof_off_b["id"]
+
+        lease_a = test_lease_acquire_and_conflict(home_a, home_b, profile_uuid, pid_b_off)
+        test_lease_renew_heartbeat(home_a, profile_uuid, lease_a)
+        lease_b = test_lease_release_and_reacquire(
+            home_a, home_b, profile_uuid, lease_a, pid_a_off, pid_b_off
+        )
+        lease_a2 = test_force_takeover(home_a, home_b, profile_uuid, lease_b)
+        test_lease_expiration(home_a, home_b, profile_uuid, lease_a2)
     finally:
         httpd2.shutdown()
         httpd2.server_close()
+
+    test_offline_open_policy(home_a, prof_off_row["uuid"])
+
+
+def test_lease_acquire_and_conflict(home_a, home_b, profile_uuid, pid_b):
+    print("--- 5.1 test_lease_acquire_and_conflict ---")
+    with store.db(db_path=home_a / "antidetect.db") as conn_a:
+        lease_a = sync_agent.acquire_lease(conn_a, profile_uuid)
+        assert lease_a["profile_uuid"] == profile_uuid
+        assert lease_a["lease_token"].startswith("ls_")
+        assert lease_a["fencing_token"] == 1
+        assert lease_a["expires_at"] > int(time.time())
+
+        local_row = conn_a.execute(
+            "SELECT * FROM local_leases WHERE profile_uuid = ?", (profile_uuid,)
+        ).fetchone()
+        assert local_row is not None
+        assert local_row["is_local_holder"] == 1
+        assert local_row["lease_token"] == lease_a["lease_token"]
+
+    # Device B mencoba mengakuisisi profil yang sama -> ditolak dengan error 2004 (LEASE_HELD)
+    conflict_caught = None
+    with store.db(db_path=home_b / "antidetect.db") as conn_b:
+        try:
+            sync_agent.acquire_lease(conn_b, profile_uuid)
+        except sync_agent.SyncLeaseError as err:
+            conflict_caught = err
+
+    assert conflict_caught is not None, "Device B harus ditolak dengan SyncLeaseError"
+    assert conflict_caught.code == 2004
+    assert "Laptop-A" in conflict_caught.message
+    assert conflict_caught.data.get("holder_device_name") == "Laptop-A"
+    assert conflict_caught.data.get("retry_after_seconds", 0) >= 1
+
+    # Uji integrasi launcher.open_profile dan api.profile_open di Device B (tanpa membuka Chrome)
+    prev_db_path = store.DB_PATH
+    store.DB_PATH = home_b / "antidetect.db"
+    try:
+        api_err_caught = None
+        try:
+            api.profile_open({"profile_id": pid_b})
+        except api.ApiError as api_err:
+            api_err_caught = api_err
+        assert api_err_caught is not None
+        assert api_err_caught.code == 1009
+        assert "Laptop-A" in api_err_caught.message
+    finally:
+        store.DB_PATH = prev_db_path
+
+    print(
+        json.dumps(
+            {
+                "acquired_by": "Laptop-A",
+                "fencing_token": lease_a["fencing_token"],
+                "conflict_code": conflict_caught.code,
+                "conflict_message": conflict_caught.message,
+                "api_error_code": 1009,
+            },
+            indent=2,
+        )
+    )
+    return lease_a
+
+
+def test_lease_renew_heartbeat(home_a, profile_uuid, lease_a):
+    print("--- 5.2 test_lease_renew_heartbeat ---")
+    base_time = int(time.time()) + 25
+    with mock.patch("antidetect.sync_server.time.time", return_value=base_time):
+        with store.db(db_path=home_a / "antidetect.db") as conn_a:
+            renew_res = sync_agent.renew_leases(conn_a)
+            assert len(renew_res["renewed"]) == 1
+            entry = renew_res["renewed"][0]
+            assert entry["profile_uuid"] == profile_uuid
+            assert entry["status"] == "ok"
+            assert entry["expires_at"] == base_time + 60
+            assert entry["expires_at"] > lease_a["expires_at"]
+
+            local_row = conn_a.execute(
+                "SELECT expires_at FROM local_leases WHERE profile_uuid = ?",
+                (profile_uuid,),
+            ).fetchone()
+            assert local_row["expires_at"] == base_time + 60
+
+    # Uji thread background heartbeat
+    hb_time = base_time + 20
+    with mock.patch("antidetect.sync_server.time.time", return_value=hb_time):
+        sync_agent.start_heartbeat(interval=0.1, db_path=home_a / "antidetect.db")
+        try:
+            time.sleep(0.25)
+        finally:
+            sync_agent.stop_heartbeat()
+
+    with store.db(db_path=home_a / "antidetect.db") as conn_a:
+        local_row = conn_a.execute(
+            "SELECT expires_at FROM local_leases WHERE profile_uuid = ?",
+            (profile_uuid,),
+        ).fetchone()
+        assert local_row["expires_at"] == hb_time + 60
+
+    print(
+        json.dumps(
+            {
+                "previous_expires_at": lease_a["expires_at"],
+                "renewed_expires_at": local_row["expires_at"],
+                "heartbeat_verified": True,
+            },
+            indent=2,
+        )
+    )
+
+
+def test_lease_release_and_reacquire(
+    home_a, home_b, profile_uuid, lease_a, pid_a=None, pid_b=None
+):
+    print("--- 5.3 test_lease_release_and_reacquire ---")
+    with store.db(db_path=home_a / "antidetect.db") as conn_a:
+        rel_res = sync_agent.release_lease(
+            conn_a, profile_uuid, lease_token=lease_a["lease_token"]
+        )
+        assert rel_res.get("released") is True
+        local_row = conn_a.execute(
+            "SELECT * FROM local_leases WHERE profile_uuid = ?", (profile_uuid,)
+        ).fetchone()
+        assert local_row is None
+
+    with store.db(db_path=home_b / "antidetect.db") as conn_b:
+        lease_b = sync_agent.acquire_lease(conn_b, profile_uuid)
+        assert lease_b["profile_uuid"] == profile_uuid
+        assert lease_b["fencing_token"] == 2
+        assert lease_b["lease_token"] != lease_a["lease_token"]
+
+    # Uji pembersihan proses mati (_prune_entry) dan profile-open-state-reset tanpa Chrome
+    if pid_b is not None:
+        prev_db_path = store.DB_PATH
+        store.DB_PATH = home_b / "antidetect.db"
+        try:
+            dead_entry = {
+                "proc": None,
+                "info": {
+                    "profile_id": pid_b,
+                    "uuid": profile_uuid,
+                    "pid": 99999999,
+                    "lease_token": lease_b["lease_token"],
+                    "fencing_token": lease_b["fencing_token"],
+                },
+            }
+            launcher._open[pid_b] = dead_entry
+            alive = launcher._prune_entry(pid_b, dead_entry)
+            assert alive is False
+            assert pid_b not in launcher._open
+
+            # Setelah _prune_entry melepas lease B, Device B mengakuisisi ulang untuk tes berikutnya
+            with store.db(db_path=home_b / "antidetect.db") as conn_b:
+                lease_b = sync_agent.acquire_lease(conn_b, profile_uuid)
+                assert lease_b["fencing_token"] == 3
+        finally:
+            store.DB_PATH = prev_db_path
+
+    print(
+        json.dumps(
+            {
+                "released_by_a": True,
+                "reacquired_by_b": True,
+                "prune_dead_process_released_lease": True,
+                "new_fencing_token": lease_b["fencing_token"],
+            },
+            indent=2,
+        )
+    )
+    return lease_b
+
+
+def test_force_takeover(home_a, home_b, profile_uuid, lease_b):
+    print("--- 5.4 test_force_takeover ---")
+    # Device B sedang memegang lease aktif (fencing_token=2).
+    # Device A melakukan acquire dengan force=True.
+    with store.db(db_path=home_a / "antidetect.db") as conn_a:
+        lease_a2 = sync_agent.acquire_lease(conn_a, profile_uuid, force=True)
+        assert lease_a2["profile_uuid"] == profile_uuid
+        assert lease_a2["fencing_token"] == lease_b["fencing_token"] + 1
+        assert lease_a2["lease_token"] != lease_b["lease_token"]
+
+    # Device B mencoba memperpanjang lease lamanya -> harus mendapat status "stolen"
+    with store.db(db_path=home_b / "antidetect.db") as conn_b:
+        renew_b = sync_agent.renew_leases(
+            conn_b,
+            leases=[
+                {
+                    "profile_uuid": profile_uuid,
+                    "lease_token": lease_b["lease_token"],
+                    "fencing_token": lease_b["fencing_token"],
+                }
+            ],
+        )
+        assert len(renew_b["renewed"]) == 1
+        assert renew_b["renewed"][0]["status"] == "stolen"
+
+        stolen_row = conn_b.execute(
+            "SELECT * FROM local_leases WHERE profile_uuid = ? AND is_local_holder = 1",
+            (profile_uuid,),
+        ).fetchone()
+        assert stolen_row is None
+
+    print(
+        json.dumps(
+            {
+                "force_takeover_by_a": True,
+                "fencing_token_after_takeover": lease_a2["fencing_token"],
+                "device_b_renew_status": renew_b["renewed"][0]["status"],
+            },
+            indent=2,
+        )
+    )
+    return lease_a2
+
+
+def test_lease_expiration(home_a, home_b, profile_uuid, lease_a2):
+    print("--- 5.5 test_lease_expiration ---")
+    # Device A memegang lease (lease_a2). Waktu server dimajukan melampaui TTL 60 detik.
+    future_epoch = int(lease_a2["expires_at"]) + 10
+    with mock.patch("antidetect.sync_server.time.time", return_value=future_epoch):
+        with store.db(db_path=home_b / "antidetect.db") as conn_b:
+            lease_b2 = sync_agent.acquire_lease(conn_b, profile_uuid, force=False)
+            assert lease_b2["profile_uuid"] == profile_uuid
+            assert lease_b2["fencing_token"] == lease_a2["fencing_token"] + 1
+            assert lease_b2["expires_at"] == future_epoch + 60
+
+            # Bersihkan lease di akhir tes online
+            sync_agent.release_lease(
+                conn_b, profile_uuid, lease_token=lease_b2["lease_token"]
+            )
+
+    print(
+        json.dumps(
+            {
+                "expired_lease_token": lease_a2["lease_token"],
+                "reacquired_without_force": True,
+                "new_fencing_token": lease_b2["fencing_token"],
+            },
+            indent=2,
+        )
+    )
+
+
+def test_offline_open_policy(home_a, profile_uuid):
+    print("--- 5.6 test_offline_open_policy ---")
+    # Server sudah dimatikan (httpd2.shutdown()).
+    with store.db(db_path=home_a / "antidetect.db") as conn_a:
+        res_offline = sync_agent.acquire_lease(conn_a, profile_uuid, timeout=1.0)
+        assert res_offline["status"] == "offline_allowed"
+        assert res_offline["offline"] is True
+        assert res_offline["fencing_token"] == 0
+        assert "warning" in res_offline
+
+    print(
+        json.dumps(
+            {
+                "offline_open_status": res_offline["status"],
+                "offline_flag": res_offline["offline"],
+                "warning": res_offline["warning"],
+            },
+            indent=2,
+        )
+    )
 
 
 def main():
     try:
         test_1_legacy_migration()
         test_2_and_3_and_4()
-        print("ALL SYNC PHASE 1 TESTS PASSED")
+        print("ALL SYNC PHASE 1 & PHASE 2 TESTS PASSED")
     finally:
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 

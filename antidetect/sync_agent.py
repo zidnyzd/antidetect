@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -34,11 +35,34 @@ ENTITY_TABLES = {
 
 
 class SyncAgentError(Exception):
-    def __init__(self, message, code=1000, http_status=None):
+    def __init__(self, message, code=1000, http_status=None, data=None, is_network_error=False):
         super().__init__(message)
         self.code = code
         self.message = message
         self.http_status = http_status
+        self.data = data
+        self.is_network_error = is_network_error
+
+
+class SyncLeaseError(SyncAgentError):
+    def __init__(self, code_or_message, message=None, data=None, http_status=409, code=2004):
+        if isinstance(code_or_message, int):
+            actual_code = code_or_message
+            actual_msg = str(message or "Profil sedang dibuka di perangkat lain")
+            actual_data = data
+        else:
+            actual_msg = str(code_or_message)
+            if isinstance(message, dict) and data is None:
+                actual_data = message
+                actual_code = code
+            elif isinstance(message, int):
+                actual_code = message
+                actual_data = data
+            else:
+                actual_code = code
+                actual_data = data
+        super().__init__(actual_msg, code=actual_code, http_status=http_status, data=actual_data)
+        self.data = actual_data if actual_data is not None else {}
 
 
 def _credentials_path(conn=None, db_path=None):
@@ -93,6 +117,7 @@ def _post_json(url, payload, token=None, timeout=15):
                 err_info.get("message") or f"HTTP {error.code}",
                 code=int(err_info.get("code") or error.code),
                 http_status=error.code,
+                data=parsed_err.get("data"),
             ) from error
         raise SyncAgentError(
             raw_err or f"HTTP {error.code}",
@@ -100,7 +125,11 @@ def _post_json(url, payload, token=None, timeout=15):
             http_status=error.code,
         ) from error
     except (urllib.error.URLError, TimeoutError, OSError) as error:
-        raise SyncAgentError(f"Gagal menghubungi server sinkronisasi: {error}", code=1000) from error
+        raise SyncAgentError(
+            f"Gagal menghubungi server sinkronisasi: {error}",
+            code=1000,
+            is_network_error=True,
+        ) from error
 
     if not isinstance(parsed, dict):
         raise SyncAgentError("Respons server bukan objek JSON", code=2003, http_status=status_code)
@@ -111,6 +140,7 @@ def _post_json(url, payload, token=None, timeout=15):
             err_obj.get("message") or "Operasi sinkronisasi gagal",
             code=err_code,
             http_status=status_code,
+            data=parsed.get("data"),
         )
     return parsed.get("data") or {}
 
@@ -432,15 +462,25 @@ def pull_changes(conn, server_url=None, token=None, limit=100):
             conn.execute("DELETE FROM local_leases WHERE is_local_holder = 0")
             for lease in active_leases:
                 holder = lease.get("holder_device_id") or ""
+                p_uuid = lease.get("profile_uuid")
+                existing_token = None
+                if holder == local_dev:
+                    existing_row = conn.execute(
+                        "SELECT lease_token FROM local_leases WHERE profile_uuid = ?",
+                        (p_uuid,),
+                    ).fetchone()
+                    if existing_row:
+                        existing_token = existing_row["lease_token"]
                 conn.execute(
                     """INSERT OR REPLACE INTO local_leases
                        (profile_uuid, holder_device_id, holder_device_name,
                         lease_token, fencing_token, expires_at, is_local_holder)
-                       VALUES (?, ?, ?, NULL, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        lease.get("profile_uuid"),
+                        p_uuid,
                         holder,
                         lease.get("holder_device_name"),
+                        existing_token,
                         int(lease.get("fencing_token") or 0),
                         int(lease.get("expires_at") or 0),
                         1 if holder == local_dev else 0,
@@ -507,3 +547,292 @@ def get_status(conn=None, db_path=None):
         "last_sync_at": last_sync_at,
         "last_sync_error": last_sync_error,
     }
+
+
+def _try_resolve_endpoint(conn=None, server_url=None, token=None):
+    creds = load_credentials(conn=conn) if conn is not None else load_credentials()
+    resolved_url = (
+        server_url
+        or creds.get("server_url")
+        or (store.get_sync_state(conn, "server_url") if conn is not None else None)
+        or ""
+    ).strip().rstrip("/")
+    resolved_token = (
+        token
+        or creds.get("device_token")
+        or (store.get_sync_state(conn, "device_token") if conn is not None else None)
+        or ""
+    ).strip()
+    if not resolved_url or not resolved_token:
+        return None, None
+    return resolved_url, resolved_token
+
+
+def acquire_lease(conn, profile_uuid=None, force=False, server_url=None, token=None, timeout=3.0):
+    if isinstance(conn, str) and profile_uuid is None:
+        profile_uuid = conn
+        conn = None
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return acquire_lease(
+                local_conn,
+                profile_uuid,
+                force=force,
+                server_url=server_url,
+                token=token,
+                timeout=timeout,
+            )
+
+    store._ensure_sync_schema(conn)
+    clean_uuid = str(profile_uuid or "").strip()
+    if not clean_uuid:
+        raise SyncAgentError("profile_uuid wajib diisi", code=2003)
+
+    resolved_url, resolved_token = _try_resolve_endpoint(conn, server_url, token)
+    if not resolved_url or not resolved_token:
+        return {"status": "local", "fencing_token": 0, "offline": True}
+
+    payload = {"profile_uuid": clean_uuid, "force": bool(force)}
+    try:
+        data = _post_json(
+            f"{resolved_url}/v1/sync/lease/acquire",
+            payload,
+            token=resolved_token,
+            timeout=timeout,
+        )
+    except SyncAgentError as error:
+        if error.http_status == 404 and error.code == 2003:
+            local_prof = conn.execute(
+                "SELECT id FROM profiles WHERE uuid = ?", (clean_uuid,)
+            ).fetchone()
+            if local_prof is not None:
+                try:
+                    push_outbox(conn, server_url=resolved_url, token=resolved_token)
+                    data = _post_json(
+                        f"{resolved_url}/v1/sync/lease/acquire",
+                        payload,
+                        token=resolved_token,
+                        timeout=timeout,
+                    )
+                except SyncAgentError as retry_err:
+                    error = retry_err
+                else:
+                    error = None
+        if error is not None:
+            if error.code == 2004 or error.http_status == 409:
+                raise SyncLeaseError(2004, error.message, error.data) from error
+            if error.is_network_error or error.http_status is None:
+                return {
+                    "status": "offline_allowed",
+                    "fencing_token": 0,
+                    "offline": True,
+                    "warning": "Server offline, profil dibuka secara lokal",
+                }
+            raise error
+
+    creds = load_credentials(conn=conn)
+    device_id = creds.get("device_id") or store.get_device_id(conn)
+    device_name = creds.get("device_name") or store.get_sync_state(conn, "device_name") or ""
+    conn.execute(
+        """INSERT OR REPLACE INTO local_leases
+           (profile_uuid, holder_device_id, holder_device_name,
+            lease_token, fencing_token, expires_at, is_local_holder)
+           VALUES (?, ?, ?, ?, ?, ?, 1)""",
+        (
+            clean_uuid,
+            device_id,
+            device_name,
+            data["lease_token"],
+            int(data["fencing_token"]),
+            int(data["expires_at"]),
+        ),
+    )
+    conn.commit()
+    result = dict(data)
+    result.setdefault("status", "acquired")
+    result.setdefault("offline", False)
+    return result
+
+
+def renew_leases(conn=None, leases=None, server_url=None, token=None, timeout=5.0):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return renew_leases(
+                local_conn,
+                leases=leases,
+                server_url=server_url,
+                token=token,
+                timeout=timeout,
+            )
+
+    store._ensure_sync_schema(conn)
+    resolved_url, resolved_token = _try_resolve_endpoint(conn, server_url, token)
+    if not resolved_url or not resolved_token:
+        return {"renewed": []}
+
+    if leases is None:
+        rows = conn.execute(
+            """SELECT profile_uuid, lease_token, fencing_token
+               FROM local_leases
+               WHERE is_local_holder = 1 AND lease_token IS NOT NULL AND lease_token != ''"""
+        ).fetchall()
+        leases = [
+            {
+                "profile_uuid": r["profile_uuid"],
+                "lease_token": r["lease_token"],
+                "fencing_token": int(r["fencing_token"] or 0),
+            }
+            for r in rows
+        ]
+
+    if not leases:
+        return {"renewed": []}
+
+    data = _post_json(
+        f"{resolved_url}/v1/sync/lease/renew",
+        {"leases": leases},
+        token=resolved_token,
+        timeout=timeout,
+    )
+    renewed = data.get("renewed") or []
+    for item in renewed:
+        p_uuid = item.get("profile_uuid")
+        if item.get("status") == "ok" and p_uuid:
+            conn.execute(
+                "UPDATE local_leases SET expires_at = ? WHERE profile_uuid = ?",
+                (int(item["expires_at"]), p_uuid),
+            )
+        elif item.get("status") == "stolen" and p_uuid:
+            conn.execute(
+                "DELETE FROM local_leases WHERE profile_uuid = ? AND is_local_holder = 1",
+                (p_uuid,),
+            )
+    conn.commit()
+    return {"renewed": renewed}
+
+
+def release_lease(
+    conn=None,
+    profile_uuid=None,
+    lease_token=None,
+    server_url=None,
+    token=None,
+    force=False,
+    timeout=3.0,
+):
+    if isinstance(conn, str) and profile_uuid is None:
+        profile_uuid = conn
+        conn = None
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return release_lease(
+                local_conn,
+                profile_uuid,
+                lease_token=lease_token,
+                server_url=server_url,
+                token=token,
+                force=force,
+                timeout=timeout,
+            )
+
+    clean_uuid = str(profile_uuid or "").strip()
+    if not clean_uuid:
+        return {"released": False}
+
+    store._ensure_sync_schema(conn)
+    if lease_token is None:
+        row = conn.execute(
+            "SELECT lease_token FROM local_leases WHERE profile_uuid = ?",
+            (clean_uuid,),
+        ).fetchone()
+        if row and row["lease_token"]:
+            lease_token = row["lease_token"]
+
+    conn.execute("DELETE FROM local_leases WHERE profile_uuid = ?", (clean_uuid,))
+    conn.commit()
+
+    resolved_url, resolved_token = _try_resolve_endpoint(conn, server_url, token)
+    if not resolved_url or not resolved_token:
+        return {"released": True, "local": True}
+
+    payload = {"profile_uuid": clean_uuid}
+    if lease_token:
+        payload["lease_token"] = lease_token
+    if force:
+        payload["force"] = True
+    try:
+        return _post_json(
+            f"{resolved_url}/v1/sync/lease/release",
+            payload,
+            token=resolved_token,
+            timeout=timeout,
+        )
+    except SyncAgentError:
+        return {"released": True, "offline": True}
+
+
+_heartbeat_lock = threading.Lock()
+_heartbeat_thread = None
+_heartbeat_stop_event = threading.Event()
+
+
+def _heartbeat_step(db_path=None):
+    from . import launcher
+
+    try:
+        launcher.opened_profiles()
+    except Exception:
+        pass
+
+    try:
+        with store.db(db_path=db_path) as conn:
+            store._ensure_sync_schema(conn)
+            rows = conn.execute(
+                """SELECT profile_uuid, lease_token, fencing_token
+                   FROM local_leases
+                   WHERE is_local_holder = 1 AND lease_token IS NOT NULL AND lease_token != ''"""
+            ).fetchall()
+            if rows:
+                leases = [
+                    {
+                        "profile_uuid": r["profile_uuid"],
+                        "lease_token": r["lease_token"],
+                        "fencing_token": int(r["fencing_token"] or 0),
+                    }
+                    for r in rows
+                ]
+                renew_leases(conn, leases=leases)
+    except Exception:
+        pass
+
+
+def start_heartbeat(interval=20, db_path=None):
+    global _heartbeat_thread
+    with _heartbeat_lock:
+        if _heartbeat_thread is not None and _heartbeat_thread.is_alive():
+            return _heartbeat_thread
+        _heartbeat_stop_event.clear()
+        wait_seconds = max(0.1, float(interval or 20))
+
+        def _worker():
+            while not _heartbeat_stop_event.wait(wait_seconds):
+                _heartbeat_step(db_path=db_path)
+
+        _heartbeat_thread = threading.Thread(
+            target=_worker, name="antidetect-lease-heartbeat", daemon=True
+        )
+        _heartbeat_thread.start()
+        return _heartbeat_thread
+
+
+def stop_heartbeat():
+    global _heartbeat_thread
+    with _heartbeat_lock:
+        _heartbeat_stop_event.set()
+        thread = _heartbeat_thread
+        _heartbeat_thread = None
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2.0)

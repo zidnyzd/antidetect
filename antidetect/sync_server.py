@@ -219,11 +219,21 @@ CREATE TABLE IF NOT EXISTS processed_mutations (
 
 class SyncServerError(Exception):
     def __init__(self, code, message, http_status=400, data=None):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.http_status = http_status
-        self.data = data
+        if isinstance(code, int) and isinstance(message, int):
+            actual_http = code
+            actual_code = message
+            actual_msg = http_status if isinstance(http_status, str) else str(http_status)
+            actual_data = data
+        else:
+            actual_code = code
+            actual_msg = message
+            actual_http = http_status
+            actual_data = data
+        super().__init__(actual_msg)
+        self.code = actual_code
+        self.message = actual_msg
+        self.http_status = actual_http
+        self.data = actual_data
 
 
 class EnrollmentToken(str):
@@ -1234,6 +1244,201 @@ def handle_pull(conn, device, body, ip_address=None):
     }
 
 
+def handle_acquire_lease(conn, device, body, ip_address=None):
+    profile_uuid = str(body.get("profile_uuid") or "").strip()
+    if not profile_uuid:
+        raise SyncServerError(2003, "profile_uuid wajib diisi", 400)
+    force = bool(body.get("force", False))
+
+    profile_row = conn.execute(
+        "SELECT * FROM sync_profiles WHERE uuid = ?", (profile_uuid,)
+    ).fetchone()
+    if not profile_row:
+        raise SyncServerError(404, 2003, "Profil tidak ditemukan")
+
+    current_epoch = int(time.time())
+    lease_row = conn.execute(
+        "SELECT * FROM profile_leases WHERE profile_uuid = ?", (profile_uuid,)
+    ).fetchone()
+    last_fencing_token = int(profile_row["last_fencing_token"] or 0)
+    if lease_row is not None:
+        last_fencing_token = max(last_fencing_token, int(lease_row["fencing_token"] or 0))
+
+    if (
+        lease_row is not None
+        and int(lease_row["expires_at"]) > current_epoch
+        and lease_row["holder_device_id"] != device["device_id"]
+        and not force
+    ):
+        holder_id = lease_row["holder_device_id"]
+        dev_row = conn.execute(
+            "SELECT device_name FROM devices WHERE device_id = ?", (holder_id,)
+        ).fetchone()
+        holder_name = (
+            dev_row["device_name"]
+            if dev_row and dev_row["device_name"]
+            else holder_id
+        )
+        expires_at = int(lease_row["expires_at"])
+        _audit(
+            conn,
+            device["device_id"],
+            "lease_conflict",
+            409,
+            target_uuid=profile_uuid,
+            ip_address=ip_address,
+            detail=f"held_by={holder_id}",
+        )
+        conn.commit()
+        raise SyncServerError(
+            409,
+            2004,
+            f"Profil sedang dibuka di perangkat {holder_name}",
+            {
+                "holder_device_id": holder_id,
+                "holder_device_name": holder_name,
+                "expires_at": expires_at,
+                "retry_after_seconds": max(1, expires_at - current_epoch),
+            },
+        )
+
+    if (
+        lease_row is not None
+        and lease_row["holder_device_id"] == device["device_id"]
+        and int(lease_row["expires_at"]) > current_epoch
+        and not force
+    ):
+        expires_at = current_epoch + 60
+        renewed_at = current_epoch
+        conn.execute(
+            """UPDATE profile_leases
+               SET renewed_at = ?, expires_at = ?
+               WHERE profile_uuid = ?""",
+            (renewed_at, expires_at, profile_uuid),
+        )
+        lease_token = lease_row["lease_token"]
+        fencing_token = int(lease_row["fencing_token"])
+    else:
+        fencing_token = last_fencing_token + 1
+        lease_token = "ls_" + secrets.token_hex(16)
+        expires_at = current_epoch + 60
+        conn.execute(
+            "UPDATE sync_profiles SET last_fencing_token = ? WHERE uuid = ?",
+            (fencing_token, profile_uuid),
+        )
+        conn.execute(
+            """INSERT OR REPLACE INTO profile_leases
+               (profile_uuid, holder_device_id, lease_token, fencing_token, acquired_at, renewed_at, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                profile_uuid,
+                device["device_id"],
+                lease_token,
+                fencing_token,
+                current_epoch,
+                current_epoch,
+                expires_at,
+            ),
+        )
+        action = "force_takeover" if force else "lease_acquire"
+        _audit(
+            conn,
+            device["device_id"],
+            action,
+            200,
+            target_uuid=profile_uuid,
+            ip_address=ip_address,
+            detail=f"fencing_token={fencing_token}",
+        )
+
+    conn.commit()
+    return {
+        "profile_uuid": profile_uuid,
+        "lease_token": lease_token,
+        "fencing_token": fencing_token,
+        "expires_at": expires_at,
+        "latest_cookie_blob_id": profile_row["cookie_blob_id"],
+        "latest_cookie_revision": int(profile_row["cookie_revision"] or 0),
+    }
+
+
+def handle_renew_lease(conn, device, body, ip_address=None):
+    leases = body.get("leases")
+    if leases is None:
+        leases = []
+    if not isinstance(leases, list):
+        raise SyncServerError(2003, "leases harus berupa array", 400)
+
+    current_epoch = int(time.time())
+    renewed = []
+    for entry in leases:
+        if not isinstance(entry, dict):
+            continue
+        profile_uuid = str(entry.get("profile_uuid") or "").strip()
+        lease_token = str(entry.get("lease_token") or "").strip()
+        if not profile_uuid:
+            continue
+        row = conn.execute(
+            """SELECT * FROM profile_leases
+               WHERE profile_uuid = ? AND holder_device_id = ?""",
+            (profile_uuid, device["device_id"]),
+        ).fetchone()
+        if row is not None and lease_token == row["lease_token"]:
+            new_expires = current_epoch + 60
+            conn.execute(
+                """UPDATE profile_leases
+                   SET renewed_at = ?, expires_at = ?
+                   WHERE profile_uuid = ?""",
+                (current_epoch, new_expires, profile_uuid),
+            )
+            renewed.append(
+                {
+                    "profile_uuid": profile_uuid,
+                    "status": "ok",
+                    "expires_at": new_expires,
+                }
+            )
+        else:
+            renewed.append(
+                {
+                    "profile_uuid": profile_uuid,
+                    "status": "stolen",
+                    "reason": "Lease telah kedaluwarsa atau diambil alih",
+                }
+            )
+
+    conn.commit()
+    return {"renewed": renewed}
+
+
+def handle_release_lease(conn, device, body, ip_address=None):
+    profile_uuid = str(body.get("profile_uuid") or "").strip()
+    if not profile_uuid:
+        raise SyncServerError(2003, "profile_uuid wajib diisi", 400)
+    force = bool(body.get("force", False))
+
+    if force:
+        conn.execute(
+            "DELETE FROM profile_leases WHERE profile_uuid = ?",
+            (profile_uuid,),
+        )
+    else:
+        conn.execute(
+            "DELETE FROM profile_leases WHERE profile_uuid = ? AND holder_device_id = ?",
+            (profile_uuid, device["device_id"]),
+        )
+    _audit(
+        conn,
+        device["device_id"],
+        "lease_release",
+        200,
+        target_uuid=profile_uuid,
+        ip_address=ip_address,
+    )
+    conn.commit()
+    return {"released": True}
+
+
 class SyncHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1299,6 +1504,24 @@ class SyncRequestHandler(BaseHTTPRequestHandler):
             if route == "/v1/sync/pull":
                 device = _authenticate(conn, self.headers.get("Authorization"), ip_address=self._client_ip())
                 data = handle_pull(conn, device, body, ip_address=self._client_ip())
+                self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
+                return
+
+            if route == "/v1/sync/lease/acquire":
+                device = _authenticate(conn, self.headers.get("Authorization"), ip_address=self._client_ip())
+                data = handle_acquire_lease(conn, device, body, ip_address=self._client_ip())
+                self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
+                return
+
+            if route == "/v1/sync/lease/renew":
+                device = _authenticate(conn, self.headers.get("Authorization"), ip_address=self._client_ip())
+                data = handle_renew_lease(conn, device, body, ip_address=self._client_ip())
+                self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
+                return
+
+            if route == "/v1/sync/lease/release":
+                device = _authenticate(conn, self.headers.get("Authorization"), ip_address=self._client_ip())
+                data = handle_release_lease(conn, device, body, ip_address=self._client_ip())
                 self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
                 return
 
