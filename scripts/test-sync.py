@@ -1,5 +1,6 @@
-"""Tes otomatis end-to-end untuk sinkronisasi Fase 1, Fase 2, dan Fase 3 tanpa menjalankan engine Chrome."""
+"""Tes otomatis end-to-end untuk sinkronisasi Fase 1 sampai Fase 5 tanpa menjalankan engine Chrome."""
 import base64
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import time
 from unittest import mock
+import zipfile
 
 SCRATCH_ROOT = Path("/home/zdna/.hermes/cache/scratch/antigravity")
 SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
@@ -19,7 +21,18 @@ os.environ["ANTIDETECT_HOME"] = str(WORK_DIR / "default_home")
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from antidetect import api, cookies, launcher, store, sync_agent, sync_crypto, sync_server  # noqa: E402
+from antidetect import (  # noqa: E402
+    api,
+    bookmarks,
+    cookies,
+    extensions,
+    launcher,
+    passwords,
+    store,
+    sync_agent,
+    sync_crypto,
+    sync_server,
+)
 
 LEGACY_SCHEMA = """
 CREATE TABLE profiles (
@@ -567,6 +580,12 @@ def test_2_and_3_and_4():
             pid_a_off,
             pid_b_off,
         )
+        print("=== Tes 8: Sinkronisasi Lanjutan Fase 5 (Bookmarks, Extensions, Passwords) ===")
+        test_bookmark_sync(home_a, home_b, profile_uuid, pid_a_off, pid_b_off)
+        test_password_sync(
+            home_a, home_b, server_dir, profile_uuid, pid_a_off, pid_b_off
+        )
+        test_extension_sync(home_a, home_b, server_dir)
     finally:
         httpd2.shutdown()
         httpd2.server_close()
@@ -1469,11 +1488,309 @@ def test_phase4_api_actions(
     )
 
 
+def test_bookmark_sync(home_a, home_b, profile_uuid, pid_a, pid_b):
+    print("--- 8.1 test_bookmark_sync ---")
+
+    class _DummyProc:
+        pid = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    prev_db = store.DB_PATH
+    prev_prof_dir = launcher.PROFILES_DIR
+    try:
+        store.DB_PATH = home_a / "antidetect.db"
+        launcher.PROFILES_DIR = home_a / "profiles"
+        bookmarks.add_bookmark(
+            pid_a,
+            "ZidStore Dashboard",
+            "https://zidstore.net/dashboard",
+            folder="Bookmarks bar",
+        )
+        bookmarks.add_bookmark(
+            pid_a,
+            "Tokopedia Seller",
+            "https://seller.tokopedia.com/home",
+            folder="Bookmarks bar/Marketplace",
+        )
+        bm_list_a = bookmarks.list_bookmarks(pid_a)
+        assert len(bm_list_a) == 2
+        digest_a = bookmarks.bookmark_digest(pid_a)
+
+        with store.db(db_path=home_a / "antidetect.db") as conn_a:
+            lease = sync_agent.acquire_lease(conn_a, profile_uuid)
+            try:
+                up_res = sync_agent.upload_bookmark_blob(
+                    conn_a, pid_a, profile_uuid, lease["fencing_token"]
+                )
+                assert up_res["blob_id"].startswith("blob_")
+                assert up_res["bookmark_revision"] == 1
+
+                dup_res = sync_agent.upload_bookmark_blob(
+                    conn_a, pid_a, profile_uuid, lease["fencing_token"]
+                )
+                assert dup_res.get("status") == "skipped"
+            finally:
+                sync_agent.release_lease(
+                    conn_a, profile_uuid, lease_token=lease["lease_token"]
+                )
+
+        # Device B membuka profil -> otomatis mengunduh dan menyuntikkan Bookmarks
+        store.DB_PATH = home_b / "antidetect.db"
+        launcher.PROFILES_DIR = home_b / "profiles"
+        with mock.patch(
+            "antidetect.launcher.subprocess.Popen", return_value=_DummyProc()
+        ), mock.patch("antidetect.launcher._wait_for_devtools", return_value=True):
+            with store.db(db_path=home_b / "antidetect.db") as conn_b:
+                row_b = store.profile_get(conn_b, pid_b)
+                prof_b = store.profile_to_dict(row_b, include_seed=True)
+                prof_b["id"] = pid_b
+            launcher.open_profile(prof_b)
+            launcher.close_profile(pid_b)
+
+        bm_path_b = bookmarks._bookmark_path(pid_b)
+        assert bm_path_b.is_file(), f"File Bookmarks harus ada di Device B: {bm_path_b}"
+        raw_bm_b = json.loads(bm_path_b.read_text(encoding="utf-8"))
+        expected_md5 = bookmarks._checksum(raw_bm_b["roots"])
+        assert raw_bm_b.get("checksum") == expected_md5, (
+            f"Checksum MD5 Chromium tidak valid: {raw_bm_b.get('checksum')} != {expected_md5}"
+        )
+
+        bm_list_b = bookmarks.list_bookmarks(pid_b)
+        assert len(bm_list_b) == 2
+        assert [(b["name"], b["url"], b["folder"]) for b in bm_list_b] == [
+            (a["name"], a["url"], a["folder"]) for a in bm_list_a
+        ]
+        assert bookmarks.bookmark_digest(pid_b) == digest_a
+
+        with store.db(db_path=home_b / "antidetect.db") as conn_b:
+            prof_b_after = store.profile_get(conn_b, pid_b)
+            assert prof_b_after["bookmark_revision"] == 1
+            assert prof_b_after["bookmark_blob_id"] == up_res["blob_id"]
+    finally:
+        store.DB_PATH = prev_db
+        launcher.PROFILES_DIR = prev_prof_dir
+
+    print(
+        json.dumps(
+            {
+                "bookmark_blob_id": up_res["blob_id"],
+                "bookmark_revision": up_res["bookmark_revision"],
+                "bookmarks_count": len(bm_list_b),
+                "md5_checksum_valid": True,
+                "sha256_digest_match": True,
+            },
+            indent=2,
+        )
+    )
+
+
+def test_password_sync(home_a, home_b, server_dir, profile_uuid, pid_a, pid_b):
+    print("--- 8.2 test_password_sync ---")
+
+    class _DummyProc:
+        pid = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    sample_passwords = [
+        {
+            "origin_url": "https://seller.tokopedia.com/",
+            "username": "seller_cabang_01@zidstore.net",
+            "password": "SandiTokopedia#2026!",
+        },
+        {
+            "origin_url": "https://seller.shopee.co.id/",
+            "username": "shopee_utama@zidstore.net",
+            "password": "SandiShopee#9988!",
+        },
+        {
+            "origin_url": "https://zidstore.net/login",
+            "username": "admin_panel",
+            "password": "SandiInternalZidStore#777!",
+        },
+    ]
+
+    prev_db = store.DB_PATH
+    prev_prof_dir = launcher.PROFILES_DIR
+    try:
+        store.DB_PATH = home_a / "antidetect.db"
+        launcher.PROFILES_DIR = home_a / "profiles"
+
+        written = passwords.update_passwords(pid_a, sample_passwords)
+        assert written == 3
+        saved_a = passwords.list_saved_passwords(pid_a)
+        assert len(saved_a) == 3
+        digest_a = passwords.password_digest(saved_a)
+        assert digest_a == passwords.password_digest(list(reversed(sample_passwords)))
+
+        # Uji unggah otomatis saat profil ditutup di Device A
+        with mock.patch(
+            "antidetect.launcher.subprocess.Popen", return_value=_DummyProc()
+        ), mock.patch("antidetect.launcher._wait_for_devtools", return_value=True):
+            with store.db(db_path=home_a / "antidetect.db") as conn_a:
+                row_a = store.profile_get(conn_a, pid_a)
+                prof_a = store.profile_to_dict(row_a, include_seed=True)
+                prof_a["id"] = pid_a
+            launcher.open_profile(prof_a)
+            launcher.close_profile(pid_a)
+
+        with store.db(db_path=home_a / "antidetect.db") as conn_a:
+            prof_a_after = store.profile_get(conn_a, pid_a)
+            assert prof_a_after["password_revision"] == 1
+            assert prof_a_after["password_blob_id"].startswith("blob_")
+            pw_blob_id = prof_a_after["password_blob_id"]
+
+        # Pastikan file blob password di server terenkripsi
+        blob_store = sync_server.LocalFilesystemBlobStore(server_dir)
+        raw_blob = blob_store.blob_path(pw_blob_id).read_bytes()
+        for secret_bytes in (
+            b"SandiTokopedia#2026!",
+            b"SandiShopee#9988!",
+            b"SandiInternalZidStore#777!",
+            b"seller_cabang_01@zidstore.net",
+        ):
+            assert secret_bytes not in raw_blob
+            assert secret_bytes not in base64.b64decode(raw_blob)
+
+        # Device B membuka profil -> otomatis mengunduh dan menyuntikkan Login Data
+        store.DB_PATH = home_b / "antidetect.db"
+        launcher.PROFILES_DIR = home_b / "profiles"
+        with mock.patch(
+            "antidetect.launcher.subprocess.Popen", return_value=_DummyProc()
+        ), mock.patch("antidetect.launcher._wait_for_devtools", return_value=True):
+            with store.db(db_path=home_b / "antidetect.db") as conn_b:
+                row_b = store.profile_get(conn_b, pid_b)
+                prof_b = store.profile_to_dict(row_b, include_seed=True)
+                prof_b["id"] = pid_b
+            launcher.open_profile(prof_b)
+            launcher.close_profile(pid_b)
+
+        saved_b = passwords.list_saved_passwords(pid_b)
+        assert len(saved_b) == 3
+        assert saved_b == saved_a, f"Password di Device B tidak cocok: {saved_b} vs {saved_a}"
+        assert passwords.password_digest(saved_b) == digest_a
+
+        with store.db(db_path=home_b / "antidetect.db") as conn_b:
+            prof_b_after = store.profile_get(conn_b, pid_b)
+            assert prof_b_after["password_revision"] == 1
+            assert prof_b_after["password_blob_id"] == pw_blob_id
+    finally:
+        store.DB_PATH = prev_db
+        launcher.PROFILES_DIR = prev_prof_dir
+
+    print(
+        json.dumps(
+            {
+                "password_blob_id": pw_blob_id,
+                "password_revision": 1,
+                "passwords_count": len(saved_b),
+                "encrypted_at_rest_verified": True,
+                "exact_match_100_percent": True,
+            },
+            indent=2,
+        )
+    )
+
+
+def test_extension_sync(home_a, home_b, server_dir):
+    print("--- 8.3 test_extension_sync ---")
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "manifest_version": 3,
+                    "name": "ZidStore Sync Helper",
+                    "version": "1.2.0",
+                    "description": "Ekstensi uji sinkronisasi Fase 5",
+                }
+            ),
+        )
+        zf.writestr("background.js", "console.log('zidstore extension ready');\n")
+    ext_b64 = base64.b64encode(zip_buf.getvalue()).decode("ascii")
+
+    prev_db = store.DB_PATH
+    prev_prof_dir = launcher.PROFILES_DIR
+    prev_ext_dir = extensions.EXTENSIONS_DIR
+    try:
+        # 1) Pasang ekstensi di Device A dan unggah paketnya ke server
+        store.DB_PATH = home_a / "antidetect.db"
+        launcher.PROFILES_DIR = home_a / "profiles"
+        extensions.EXTENSIONS_DIR = home_a / "extensions"
+
+        uploaded_ext = extensions.upload("zidstore-helper.zip", ext_b64)
+        slug = uploaded_ext["slug"]
+        assert slug == "zidstore-sync-helper"
+        assert (home_a / "extensions" / slug / "manifest.json").is_file()
+
+        archive_bytes, archive_sha = extensions.get_extension_archive(slug)
+        assert len(archive_bytes) > 0 and len(archive_sha) == 64
+
+        with store.db(db_path=home_a / "antidetect.db") as conn_a:
+            ext_blob_res = sync_agent.upload_extension_blob(conn_a, slug)
+            assert ext_blob_res["blob_id"].startswith("blob_")
+            assert ext_blob_res["slug"] == slug
+
+        # 2) Device B menarik perubahan dari server -> ekstensi otomatis diunduh dan dipasang
+        store.DB_PATH = home_b / "antidetect.db"
+        launcher.PROFILES_DIR = home_b / "profiles"
+        extensions.EXTENSIONS_DIR = home_b / "extensions"
+
+        assert not (home_b / "extensions" / slug).exists()
+
+        with store.db(db_path=home_b / "antidetect.db") as conn_b:
+            pull_res = sync_agent.pull_changes(conn_b)
+            assert pull_res["pulled"] >= 1
+            ext_row_b = conn_b.execute(
+                "SELECT * FROM extensions WHERE slug = ?", (slug,)
+            ).fetchone()
+            assert ext_row_b is not None
+            assert ext_row_b["title"] == "ZidStore Sync Helper"
+            assert ext_row_b["version"] == "1.2.0"
+
+        ext_dir_b = home_b / "extensions" / slug
+        assert ext_dir_b.is_dir(), f"Direktori ekstensi harus terpasang di Device B: {ext_dir_b}"
+        assert (ext_dir_b / "manifest.json").is_file()
+        assert (ext_dir_b / "background.js").is_file()
+        assert (
+            (ext_dir_b / "background.js").read_text(encoding="utf-8")
+            == "console.log('zidstore extension ready');\n"
+        )
+
+        listed_b = extensions.list_extensions()
+        assert any(item["slug"] == slug for item in listed_b["data"])
+        resolved_paths = extensions.extension_paths([ext_row_b["id"]])
+        assert ext_dir_b in resolved_paths
+    finally:
+        store.DB_PATH = prev_db
+        launcher.PROFILES_DIR = prev_prof_dir
+        extensions.EXTENSIONS_DIR = prev_ext_dir
+
+    print(
+        json.dumps(
+            {
+                "extension_slug": slug,
+                "extension_blob_id": ext_blob_res["blob_id"],
+                "installed_on_device_b_dir": str(ext_dir_b),
+                "manifest_and_script_verified": True,
+                "db_registered_on_device_b": True,
+            },
+            indent=2,
+        )
+    )
+
+
 def main():
     try:
         test_1_legacy_migration()
         test_2_and_3_and_4()
-        print("ALL SYNC PHASE 1, PHASE 2, PHASE 3 & PHASE 4 TESTS PASSED")
+        print("ALL SYNC PHASE 1, PHASE 2, PHASE 3, PHASE 4 & PHASE 5 TESTS PASSED")
     finally:
         shutil.rmtree(WORK_DIR, ignore_errors=True)
 

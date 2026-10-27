@@ -857,18 +857,19 @@ def _release_profile_lease(profile_id, info=None):
 def _sync_cookies_after_close(profile_id, info=None):
     from . import cookies
 
-    if not cookies.verify_cookie_db(profile_id):
-        return None
-    try:
-        cookies_json = cookies.get_cookies(profile_id)
-        cookie_list = json.loads(cookies_json) if cookies_json else []
-    except Exception:
-        return None
+    cookie_list = None
+    if cookies.verify_cookie_db(profile_id):
+        try:
+            cookies_json = cookies.get_cookies(profile_id)
+            cookie_list = json.loads(cookies_json) if cookies_json else []
+        except Exception:
+            cookie_list = None
 
     profile_uuid = (info or {}).get("uuid") if isinstance(info, dict) else None
     fencing_token = (
         (info or {}).get("fencing_token") if isinstance(info, dict) else None
     )
+    cookie_res = None
     try:
         with store.db() as conn:
             if not profile_uuid and profile_id is not None:
@@ -884,16 +885,39 @@ def _sync_cookies_after_close(profile_id, info=None):
                     fencing_token = int(l_row["fencing_token"])
             resolved_url, resolved_token = sync_agent._try_resolve_endpoint(conn)
             if profile_uuid and resolved_url and resolved_token:
-                return sync_agent.upload_cookie_blob(
-                    conn,
-                    profile_id,
-                    profile_uuid,
-                    cookie_list,
-                    int(fencing_token or 0),
-                )
+                fence_val = int(fencing_token or 0)
+                if cookie_list is not None:
+                    try:
+                        cookie_res = sync_agent.upload_cookie_blob(
+                            conn,
+                            profile_id,
+                            profile_uuid,
+                            cookie_list,
+                            fence_val,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    sync_agent.upload_bookmark_blob(
+                        conn,
+                        profile_id,
+                        profile_uuid,
+                        fence_val,
+                    )
+                except Exception:
+                    pass
+                try:
+                    sync_agent.upload_password_blob(
+                        conn,
+                        profile_id,
+                        profile_uuid,
+                        fence_val,
+                    )
+                except Exception:
+                    pass
     except Exception:
         return None
-    return None
+    return cookie_res
 
 
 def _prune_entry(profile_id, entry):
@@ -1102,13 +1126,18 @@ def open_profile(profile, app_args=None, force_lease=False):
                     conn, profile_uuid, force=bool(force_lease)
                 )
                 if isinstance(lease_info, dict):
+                    prof_row = (
+                        store.profile_get(conn, profile_id)
+                        if profile_id is not None
+                        else None
+                    )
+                    prof_keys = prof_row.keys() if prof_row else ()
+
                     latest_blob_id = lease_info.get("latest_cookie_blob_id")
                     latest_rev = int(lease_info.get("latest_cookie_revision") or 0)
                     local_rev = profile.get("cookie_revision")
-                    if local_rev is None and profile_id is not None:
-                        prof_row = store.profile_get(conn, profile_id)
-                        if prof_row and "cookie_revision" in prof_row.keys():
-                            local_rev = prof_row["cookie_revision"]
+                    if local_rev is None and "cookie_revision" in prof_keys:
+                        local_rev = prof_row["cookie_revision"]
                     local_rev = int(local_rev or 0)
                     if latest_blob_id and latest_rev > local_rev:
                         sync_agent.download_and_inject_cookies(
@@ -1116,6 +1145,32 @@ def open_profile(profile, app_args=None, force_lease=False):
                         )
                         profile["cookie_revision"] = latest_rev
                         profile["cookie_blob_id"] = latest_blob_id
+
+                    latest_bm_blob_id = lease_info.get("latest_bookmark_blob_id")
+                    latest_bm_rev = int(lease_info.get("latest_bookmark_revision") or 0)
+                    local_bm_rev = profile.get("bookmark_revision")
+                    if local_bm_rev is None and "bookmark_revision" in prof_keys:
+                        local_bm_rev = prof_row["bookmark_revision"]
+                    local_bm_rev = int(local_bm_rev or 0)
+                    if latest_bm_blob_id and latest_bm_rev > local_bm_rev:
+                        sync_agent.download_and_inject_bookmarks(
+                            conn, profile_id, profile_uuid, latest_bm_blob_id
+                        )
+                        profile["bookmark_revision"] = latest_bm_rev
+                        profile["bookmark_blob_id"] = latest_bm_blob_id
+
+                    latest_pw_blob_id = lease_info.get("latest_password_blob_id")
+                    latest_pw_rev = int(lease_info.get("latest_password_revision") or 0)
+                    local_pw_rev = profile.get("password_revision")
+                    if local_pw_rev is None and "password_revision" in prof_keys:
+                        local_pw_rev = prof_row["password_revision"]
+                    local_pw_rev = int(local_pw_rev or 0)
+                    if latest_pw_blob_id and latest_pw_rev > local_pw_rev:
+                        sync_agent.download_and_inject_passwords(
+                            conn, profile_id, profile_uuid, latest_pw_blob_id
+                        )
+                        profile["password_revision"] = latest_pw_rev
+                        profile["password_blob_id"] = latest_pw_blob_id
         except sync_agent.SyncLeaseError as error:
             holder_name = (error.data or {}).get("holder_device_name")
             msg = (

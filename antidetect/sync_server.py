@@ -15,6 +15,7 @@ from .paths import DATA_DIR
 
 DEFAULT_GROUP_UUID = "00000000-0000-4000-8000-000000000001"
 MAX_COOKIE_BLOB_BYTES = 10 * 1024 * 1024
+MAX_EXTENSION_BLOB_BYTES = 50 * 1024 * 1024
 BLOB_RETENTION_COUNT = 3
 
 SERVER_SCHEMA = """
@@ -127,6 +128,10 @@ CREATE TABLE IF NOT EXISTS sync_profiles (
     cookie_revision INTEGER NOT NULL DEFAULT 0,
     cookie_updated_at TEXT,
     cookie_origin_device TEXT,
+    bookmark_blob_id TEXT,
+    bookmark_revision INTEGER NOT NULL DEFAULT 0,
+    password_blob_id TEXT,
+    password_revision INTEGER NOT NULL DEFAULT 0,
     last_fencing_token INTEGER NOT NULL DEFAULT 0,
     revision INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
@@ -140,8 +145,8 @@ CREATE INDEX IF NOT EXISTS idx_sync_profiles_deleted ON sync_profiles (deleted_a
 
 CREATE TABLE IF NOT EXISTS profile_blobs (
     blob_id TEXT PRIMARY KEY,
-    profile_uuid TEXT NOT NULL REFERENCES sync_profiles(uuid),
-    blob_kind TEXT NOT NULL CHECK (blob_kind IN ('cookies', 'bookmarks', 'extension_pkg', 'snapshot')),
+    profile_uuid TEXT NOT NULL,
+    blob_kind TEXT NOT NULL CHECK (blob_kind IN ('cookies', 'bookmarks', 'extension_pkg', 'passwords', 'snapshot')),
     revision INTEGER NOT NULL,
     sha256_plain TEXT NOT NULL,
     sha256_cipher TEXT NOT NULL,
@@ -167,7 +172,10 @@ CREATE INDEX IF NOT EXISTS idx_profile_leases_expires ON profile_leases (expires
 CREATE TABLE IF NOT EXISTS change_log (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_type TEXT NOT NULL CHECK (
-        entity_type IN ('profile', 'group', 'tag', 'proxy', 'template', 'extension', 'cookie_blob')
+        entity_type IN (
+            'profile', 'group', 'tag', 'proxy', 'template', 'extension',
+            'cookie_blob', 'bookmark_blob', 'password_blob', 'extension_blob'
+        )
     ),
     entity_uuid TEXT NOT NULL,
     operation TEXT NOT NULL CHECK (operation IN ('upsert', 'soft_delete', 'purge')),
@@ -400,6 +408,20 @@ def init_server_db(db_path=None):
     conn = connect_server_db(db_path)
     try:
         conn.executescript(SERVER_SCHEMA)
+        p_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(sync_profiles)").fetchall()
+        }
+        for col_name, col_def in (
+            ("bookmark_blob_id", "TEXT"),
+            ("bookmark_revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("password_blob_id", "TEXT"),
+            ("password_revision", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col_name not in p_cols:
+                conn.execute(
+                    f"ALTER TABLE sync_profiles ADD COLUMN {col_name} {col_def}"
+                )
         row = conn.execute(
             "SELECT value FROM server_meta WHERE key = 'kdf_salt_hex'"
         ).fetchone()
@@ -533,6 +555,11 @@ def _row_to_payload(entity_type, row):
             "deleted_at": row["deleted_at"],
         }
     if entity_type == "profile":
+        keys = row.keys()
+        bm_blob = row["bookmark_blob_id"] if "bookmark_blob_id" in keys else None
+        bm_rev = int(row["bookmark_revision"] or 0) if "bookmark_revision" in keys else 0
+        pw_blob = row["password_blob_id"] if "password_blob_id" in keys else None
+        pw_rev = int(row["password_revision"] or 0) if "password_revision" in keys else 0
         return {
             "uuid": row["uuid"],
             "name": row["name"],
@@ -550,6 +577,16 @@ def _row_to_payload(entity_type, row):
             "last_open_time": row["last_open_time"],
             "cookie_blob_id": row["cookie_blob_id"],
             "cookie_revision": row["cookie_revision"],
+            "latest_cookie_blob_id": row["cookie_blob_id"],
+            "latest_cookie_revision": int(row["cookie_revision"] or 0),
+            "bookmark_blob_id": bm_blob,
+            "bookmark_revision": bm_rev,
+            "latest_bookmark_blob_id": bm_blob,
+            "latest_bookmark_revision": bm_rev,
+            "password_blob_id": pw_blob,
+            "password_revision": pw_rev,
+            "latest_password_blob_id": pw_blob,
+            "latest_password_revision": pw_rev,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "deleted_at": row["deleted_at"],
@@ -940,8 +977,9 @@ def _apply_entity_write(conn, entity_type, entity_uuid, operation, payload, new_
                    (uuid, name, group_uuid, color, note, site_id, site_url,
                     proxy_config, proxy_fingerprint, fingerprint_config, preference_config,
                     tag_uuids, seed, last_open_time, cookie_blob_id, cookie_revision,
+                    bookmark_blob_id, bookmark_revision, password_blob_id, password_revision,
                     revision, created_at, updated_at, deleted_at, purged_at, origin_device)
-                   VALUES (?, ?, ?, NULL, NULL, NULL, NULL, '{}', NULL, '{}', '{}', '[]', 1, NULL, NULL, 0, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, NULL, NULL, NULL, NULL, '{}', NULL, '{}', '{}', '[]', 1, NULL, NULL, 0, NULL, 0, NULL, 0, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(uuid) DO UPDATE SET
                        color = NULL,
                        note = NULL,
@@ -951,6 +989,8 @@ def _apply_entity_write(conn, entity_type, entity_uuid, operation, payload, new_
                        preference_config = '{}',
                        tag_uuids = '[]',
                        cookie_blob_id = NULL,
+                       bookmark_blob_id = NULL,
+                       password_blob_id = NULL,
                        revision = excluded.revision,
                        updated_at = excluded.updated_at,
                        deleted_at = COALESCE(sync_profiles.deleted_at, excluded.deleted_at),
@@ -994,8 +1034,9 @@ def _apply_entity_write(conn, entity_type, entity_uuid, operation, payload, new_
                    (uuid, name, group_uuid, color, note, site_id, site_url,
                     proxy_config, proxy_fingerprint, fingerprint_config, preference_config,
                     tag_uuids, seed, last_open_time, cookie_blob_id, cookie_revision,
+                    bookmark_blob_id, bookmark_revision, password_blob_id, password_revision,
                     revision, created_at, updated_at, deleted_at, purged_at, origin_device)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
                    ON CONFLICT(uuid) DO UPDATE SET
                        name = excluded.name,
                        group_uuid = excluded.group_uuid,
@@ -1012,6 +1053,10 @@ def _apply_entity_write(conn, entity_type, entity_uuid, operation, payload, new_
                        last_open_time = excluded.last_open_time,
                        cookie_blob_id = COALESCE(excluded.cookie_blob_id, sync_profiles.cookie_blob_id),
                        cookie_revision = MAX(excluded.cookie_revision, sync_profiles.cookie_revision),
+                       bookmark_blob_id = COALESCE(excluded.bookmark_blob_id, sync_profiles.bookmark_blob_id),
+                       bookmark_revision = MAX(excluded.bookmark_revision, sync_profiles.bookmark_revision),
+                       password_blob_id = COALESCE(excluded.password_blob_id, sync_profiles.password_blob_id),
+                       password_revision = MAX(excluded.password_revision, sync_profiles.password_revision),
                        revision = excluded.revision,
                        updated_at = excluded.updated_at,
                        deleted_at = excluded.deleted_at,
@@ -1034,6 +1079,10 @@ def _apply_entity_write(conn, entity_type, entity_uuid, operation, payload, new_
                     payload.get("last_open_time"),
                     payload.get("cookie_blob_id"),
                     int(payload.get("cookie_revision") or 0),
+                    payload.get("bookmark_blob_id"),
+                    int(payload.get("bookmark_revision") or 0),
+                    payload.get("password_blob_id"),
+                    int(payload.get("password_revision") or 0),
                     new_revision,
                     created_at,
                     updated_at,
@@ -1318,6 +1367,26 @@ def handle_pull(conn, device, body, ip_address=None):
 
     changes = []
     for row in sliced:
+        payload_dict = _loads_json(row["payload"], {})
+        if row["entity_type"] == "profile" and isinstance(payload_dict, dict):
+            prof_cur = conn.execute(
+                """SELECT cookie_blob_id, cookie_revision,
+                          bookmark_blob_id, bookmark_revision,
+                          password_blob_id, password_revision
+                   FROM sync_profiles WHERE uuid = ?""",
+                (row["entity_uuid"],),
+            ).fetchone()
+            if prof_cur:
+                payload_dict.setdefault("latest_cookie_blob_id", prof_cur["cookie_blob_id"])
+                payload_dict.setdefault("latest_cookie_revision", int(prof_cur["cookie_revision"] or 0))
+                payload_dict["bookmark_blob_id"] = prof_cur["bookmark_blob_id"]
+                payload_dict["bookmark_revision"] = int(prof_cur["bookmark_revision"] or 0)
+                payload_dict["latest_bookmark_blob_id"] = prof_cur["bookmark_blob_id"]
+                payload_dict["latest_bookmark_revision"] = int(prof_cur["bookmark_revision"] or 0)
+                payload_dict["password_blob_id"] = prof_cur["password_blob_id"]
+                payload_dict["password_revision"] = int(prof_cur["password_revision"] or 0)
+                payload_dict["latest_password_blob_id"] = prof_cur["password_blob_id"]
+                payload_dict["latest_password_revision"] = int(prof_cur["password_revision"] or 0)
         changes.append(
             {
                 "seq": row["seq"],
@@ -1327,7 +1396,7 @@ def handle_pull(conn, device, body, ip_address=None):
                 "revision": row["revision"],
                 "origin_device": row["origin_device"],
                 "changed_at": row["changed_at"],
-                "payload": _loads_json(row["payload"], {}),
+                "payload": payload_dict,
             }
         )
 
@@ -1460,6 +1529,7 @@ def handle_acquire_lease(conn, device, body, ip_address=None):
         )
 
     conn.commit()
+    p_keys = profile_row.keys()
     return {
         "profile_uuid": profile_uuid,
         "lease_token": lease_token,
@@ -1467,6 +1537,10 @@ def handle_acquire_lease(conn, device, body, ip_address=None):
         "expires_at": expires_at,
         "latest_cookie_blob_id": profile_row["cookie_blob_id"],
         "latest_cookie_revision": int(profile_row["cookie_revision"] or 0),
+        "latest_bookmark_blob_id": profile_row["bookmark_blob_id"] if "bookmark_blob_id" in p_keys else None,
+        "latest_bookmark_revision": int(profile_row["bookmark_revision"] or 0) if "bookmark_revision" in p_keys else 0,
+        "latest_password_blob_id": profile_row["password_blob_id"] if "password_blob_id" in p_keys else None,
+        "latest_password_revision": int(profile_row["password_revision"] or 0) if "password_revision" in p_keys else 0,
     }
 
 
@@ -1548,12 +1622,14 @@ def handle_release_lease(conn, device, body, ip_address=None):
 
 
 def handle_upload_blob(conn, device, body, ip_address=None):
-    profile_uuid = str(body.get("profile_uuid") or "").strip()
+    profile_uuid = str(
+        body.get("profile_uuid") or body.get("extension_uuid") or body.get("slug") or ""
+    ).strip()
     if not profile_uuid:
         raise SyncServerError(400, 2003, "profile_uuid wajib diisi")
 
     blob_kind = str(body.get("blob_kind") or "cookies").strip() or "cookies"
-    if blob_kind not in ("cookies", "bookmarks", "extension_pkg", "snapshot"):
+    if blob_kind not in ("cookies", "bookmarks", "extension_pkg", "passwords", "snapshot"):
         raise SyncServerError(400, 2003, f"blob_kind tidak didukung: {blob_kind}")
 
     try:
@@ -1581,8 +1657,166 @@ def handle_upload_blob(conn, device, body, ip_address=None):
     except (TypeError, ValueError):
         size_bytes = len(ciphertext_base64)
 
-    if size_bytes > MAX_COOKIE_BLOB_BYTES or len(ciphertext_base64) > MAX_COOKIE_BLOB_BYTES * 2:
-        raise SyncServerError(413, 2010, "Ukuran blob melebihi batas maksimum 10 MB")
+    max_bytes = (
+        MAX_EXTENSION_BLOB_BYTES
+        if blob_kind == "extension_pkg"
+        else MAX_COOKIE_BLOB_BYTES
+    )
+    if size_bytes > max_bytes or len(ciphertext_base64) > max_bytes * 2:
+        raise SyncServerError(413, 2010, "Ukuran blob melebihi batas maksimum")
+
+    blob_store = LocalFilesystemBlobStore(_server_db_path(conn))
+
+    if blob_kind == "extension_pkg":
+        slug = str(body.get("slug") or profile_uuid).strip()
+        ext_row = conn.execute(
+            "SELECT * FROM sync_extensions WHERE uuid = ? OR slug = ? LIMIT 1",
+            (profile_uuid, slug),
+        ).fetchone()
+        ext_uuid = ext_row["uuid"] if ext_row else profile_uuid
+        if ext_row and not body.get("slug"):
+            slug = ext_row["slug"]
+        title = body.get("title") or (ext_row["title"] if ext_row else slug)
+        version = body.get("version") or (ext_row["version"] if ext_row else "1.0")
+
+        active_blob_id = ext_row["archive_blob_id"] if ext_row else None
+        if active_blob_id:
+            active_row = conn.execute(
+                """SELECT * FROM profile_blobs
+                   WHERE blob_id = ? AND profile_uuid = ? AND blob_kind = 'extension_pkg'""",
+                (active_blob_id, ext_uuid),
+            ).fetchone()
+            if (
+                active_row is not None
+                and active_row["sha256_plain"] == sha256_plain
+                and blob_store.exists(active_blob_id)
+            ):
+                seq_row = conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) AS s FROM change_log WHERE entity_uuid = ?",
+                    (ext_uuid,),
+                ).fetchone()
+                return {
+                    "blob_id": active_blob_id,
+                    "profile_uuid": ext_uuid,
+                    "extension_uuid": ext_uuid,
+                    "slug": slug,
+                    "revision": int(ext_row["revision"] or active_row["revision"]),
+                    "seq": int(seq_row["s"] if seq_row else 0),
+                }
+
+        current_ext_rev = int(ext_row["revision"] or 0) if ext_row else 0
+        ext_revision = current_ext_rev + 1
+        if body.get("revision") is not None:
+            try:
+                client_rev = int(body.get("revision"))
+            except (TypeError, ValueError):
+                client_rev = ext_revision
+            if client_rev != ext_revision:
+                raise SyncServerError(
+                    409,
+                    2007,
+                    f"Revisi ekstensi belum sinkron ({client_rev} != {ext_revision})",
+                    {"expected_revision": ext_revision},
+                )
+
+        blob_id = f"blob_{secrets.token_hex(12)}"
+        storage_key = blob_store.put(blob_id, ciphertext_base64.encode("utf-8"))
+        now = now_utc()
+        created_at = ext_row["created_at"] if ext_row else now
+
+        conn.execute(
+            """INSERT INTO sync_extensions
+               (uuid, slug, title, version, archive_blob_id, archive_sha256,
+                revision, created_at, updated_at, deleted_at, origin_device)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+               ON CONFLICT(uuid) DO UPDATE SET
+                   slug = excluded.slug,
+                   title = excluded.title,
+                   version = excluded.version,
+                   archive_blob_id = excluded.archive_blob_id,
+                   archive_sha256 = excluded.archive_sha256,
+                   revision = excluded.revision,
+                   updated_at = excluded.updated_at,
+                   deleted_at = NULL,
+                   origin_device = excluded.origin_device""",
+            (
+                ext_uuid,
+                slug,
+                title,
+                version,
+                blob_id,
+                sha256_plain,
+                ext_revision,
+                created_at,
+                now,
+                device["device_id"],
+            ),
+        )
+        conn.execute(
+            """INSERT INTO profile_blobs
+               (blob_id, profile_uuid, blob_kind, revision, sha256_plain, sha256_cipher,
+                size_bytes, encryption_scheme, storage_key, created_at, origin_device)
+               VALUES (?, ?, 'extension_pkg', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                blob_id,
+                ext_uuid,
+                ext_revision,
+                sha256_plain,
+                sha256_cipher,
+                size_bytes,
+                encryption_scheme,
+                storage_key,
+                now,
+                device["device_id"],
+            ),
+        )
+        updated_ext = conn.execute(
+            "SELECT * FROM sync_extensions WHERE uuid = ?", (ext_uuid,)
+        ).fetchone()
+        ext_payload = _row_to_payload("extension", updated_ext)
+        cur = conn.execute(
+            """INSERT INTO change_log
+               (entity_type, entity_uuid, operation, revision, origin_device, changed_at, payload)
+               VALUES ('extension', ?, 'upsert', ?, ?, ?, ?)""",
+            (
+                ext_uuid,
+                ext_revision,
+                device["device_id"],
+                now,
+                _dumps_json(ext_payload),
+            ),
+        )
+        seq = int(cur.lastrowid)
+
+        blob_rows = conn.execute(
+            """SELECT blob_id FROM profile_blobs
+               WHERE profile_uuid = ? AND blob_kind = 'extension_pkg'
+               ORDER BY revision DESC""",
+            (ext_uuid,),
+        ).fetchall()
+        for stale_row in blob_rows[BLOB_RETENTION_COUNT:]:
+            stale_blob_id = stale_row["blob_id"]
+            blob_store.delete(stale_blob_id)
+            conn.execute("DELETE FROM profile_blobs WHERE blob_id = ?", (stale_blob_id,))
+
+        _audit(
+            conn,
+            device["device_id"],
+            "blob_upload",
+            200,
+            target_uuid=ext_uuid,
+            ip_address=ip_address,
+            detail=f"kind=extension_pkg blob_id={blob_id} rev={ext_revision}",
+        )
+        conn.commit()
+        return {
+            "blob_id": blob_id,
+            "profile_uuid": ext_uuid,
+            "extension_uuid": ext_uuid,
+            "slug": slug,
+            "revision": ext_revision,
+            "seq": seq,
+        }
 
     profile_row = conn.execute(
         "SELECT * FROM sync_profiles WHERE uuid = ?", (profile_uuid,)
@@ -1609,8 +1843,21 @@ def handle_upload_blob(conn, device, body, ip_address=None):
             {"current_fencing_token": last_fencing_token},
         )
 
-    blob_store = LocalFilesystemBlobStore(_server_db_path(conn))
-    active_blob_id = profile_row["cookie_blob_id"] if blob_kind == "cookies" else None
+    p_keys = profile_row.keys()
+    if blob_kind == "bookmarks":
+        blob_col = "bookmark_blob_id"
+        rev_col = "bookmark_revision"
+        log_entity_type = "bookmark_blob"
+    elif blob_kind == "passwords":
+        blob_col = "password_blob_id"
+        rev_col = "password_revision"
+        log_entity_type = "password_blob"
+    else:
+        blob_col = "cookie_blob_id"
+        rev_col = "cookie_revision"
+        log_entity_type = "cookie_blob"
+
+    active_blob_id = profile_row[blob_col] if blob_col in p_keys else None
     if active_blob_id:
         active_row = conn.execute(
             """SELECT * FROM profile_blobs
@@ -1626,51 +1873,73 @@ def handle_upload_blob(conn, device, body, ip_address=None):
                 "SELECT COALESCE(MAX(seq), 0) AS s FROM change_log WHERE entity_uuid = ?",
                 (profile_uuid,),
             ).fetchone()
+            cur_rev = int(
+                (profile_row[rev_col] if rev_col in p_keys else 0)
+                or active_row["revision"]
+            )
             return {
                 "blob_id": active_blob_id,
                 "profile_uuid": profile_uuid,
-                "cookie_revision": int(
-                    profile_row["cookie_revision"] or active_row["revision"]
-                ),
+                "revision": cur_rev,
+                rev_col: cur_rev,
                 "seq": int(seq_row["s"] if seq_row else 0),
             }
 
-    current_cookie_revision = int(profile_row["cookie_revision"] or 0)
-    cookie_revision = current_cookie_revision + 1
+    current_revision = int(profile_row[rev_col] or 0) if rev_col in p_keys else 0
+    new_revision = current_revision + 1
     if body.get("revision") is not None:
         try:
             client_rev = int(body.get("revision"))
         except (TypeError, ValueError):
-            client_rev = cookie_revision
-        if client_rev != cookie_revision:
+            client_rev = new_revision
+        if client_rev != new_revision:
             raise SyncServerError(
                 409,
                 2007,
-                f"Revisi cookie belum sinkron ({client_rev} != {cookie_revision})",
-                {"expected_revision": cookie_revision},
+                f"Revisi {blob_kind} belum sinkron ({client_rev} != {new_revision})",
+                {"expected_revision": new_revision},
             )
 
     blob_id = f"blob_{secrets.token_hex(12)}"
     storage_key = blob_store.put(blob_id, ciphertext_base64.encode("utf-8"))
     now = now_utc()
 
-    conn.execute(
-        """UPDATE sync_profiles
-           SET cookie_blob_id = ?,
-               cookie_revision = ?,
-               cookie_updated_at = ?,
-               cookie_origin_device = ?,
-               last_fencing_token = MAX(last_fencing_token, ?)
-           WHERE uuid = ?""",
-        (
-            blob_id,
-            cookie_revision,
-            now,
-            device["device_id"],
-            fencing_token,
-            profile_uuid,
-        ),
-    )
+    if blob_kind == "bookmarks":
+        conn.execute(
+            """UPDATE sync_profiles
+               SET bookmark_blob_id = ?,
+                   bookmark_revision = ?,
+                   last_fencing_token = MAX(last_fencing_token, ?)
+               WHERE uuid = ?""",
+            (blob_id, new_revision, fencing_token, profile_uuid),
+        )
+    elif blob_kind == "passwords":
+        conn.execute(
+            """UPDATE sync_profiles
+               SET password_blob_id = ?,
+                   password_revision = ?,
+                   last_fencing_token = MAX(last_fencing_token, ?)
+               WHERE uuid = ?""",
+            (blob_id, new_revision, fencing_token, profile_uuid),
+        )
+    else:
+        conn.execute(
+            """UPDATE sync_profiles
+               SET cookie_blob_id = ?,
+                   cookie_revision = ?,
+                   cookie_updated_at = ?,
+                   cookie_origin_device = ?,
+                   last_fencing_token = MAX(last_fencing_token, ?)
+               WHERE uuid = ?""",
+            (
+                blob_id,
+                new_revision,
+                now,
+                device["device_id"],
+                fencing_token,
+                profile_uuid,
+            ),
+        )
 
     conn.execute(
         """INSERT INTO profile_blobs
@@ -1681,7 +1950,7 @@ def handle_upload_blob(conn, device, body, ip_address=None):
             blob_id,
             profile_uuid,
             blob_kind,
-            cookie_revision,
+            new_revision,
             sha256_plain,
             sha256_cipher,
             size_bytes,
@@ -1694,17 +1963,23 @@ def handle_upload_blob(conn, device, body, ip_address=None):
 
     change_payload = {
         "blob_id": blob_id,
-        "cookie_revision": cookie_revision,
+        "blob_kind": blob_kind,
+        "revision": new_revision,
+        rev_col: new_revision,
+        blob_col: blob_id,
+        f"latest_{blob_col}": blob_id,
+        f"latest_{rev_col}": new_revision,
         "sha256_plain": sha256_plain,
         "sha256_cipher": sha256_cipher,
     }
     cur = conn.execute(
         """INSERT INTO change_log
            (entity_type, entity_uuid, operation, revision, origin_device, changed_at, payload)
-           VALUES ('cookie_blob', ?, 'upsert', ?, ?, ?, ?)""",
+           VALUES (?, ?, 'upsert', ?, ?, ?, ?)""",
         (
+            log_entity_type,
             profile_uuid,
-            cookie_revision,
+            new_revision,
             device["device_id"],
             now,
             _dumps_json(change_payload),
@@ -1730,13 +2005,14 @@ def handle_upload_blob(conn, device, body, ip_address=None):
         200,
         target_uuid=profile_uuid,
         ip_address=ip_address,
-        detail=f"blob_id={blob_id} rev={cookie_revision}",
+        detail=f"kind={blob_kind} blob_id={blob_id} rev={new_revision}",
     )
     conn.commit()
     return {
         "blob_id": blob_id,
         "profile_uuid": profile_uuid,
-        "cookie_revision": cookie_revision,
+        "revision": new_revision,
+        rev_col: new_revision,
         "seq": seq,
     }
 

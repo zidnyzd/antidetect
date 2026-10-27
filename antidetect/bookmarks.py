@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 import uuid
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import launcher
@@ -24,8 +25,21 @@ class BookmarkError(Exception):
     pass
 
 
+def _profiles_dir():
+    from . import paths, store
+
+    if launcher.PROFILES_DIR != paths.DATA_DIR / "profiles":
+        return launcher.PROFILES_DIR
+    if Path(store.DB_PATH) != store._INITIAL_DB_PATH:
+        return Path(store.DB_PATH).parent / "profiles"
+    env_home = os.environ.get("ANTIDETECT_HOME")
+    if env_home:
+        return Path(env_home) / "profiles"
+    return launcher.PROFILES_DIR
+
+
 def _bookmark_path(profile_id):
-    base = launcher.PROFILES_DIR / str(profile_id)
+    base = _profiles_dir() / str(profile_id)
     candidates = (
         base / "data" / "Default" / "Bookmarks",
         base / "Default" / "Bookmarks",
@@ -389,3 +403,104 @@ def delete_bookmark(profile_id, bookmark_id):
 
     _save(path, data)
     return {"id": wanted, "name": str(removed.get("name") or "")}
+
+
+def _canonical_node(node):
+    if not isinstance(node, dict):
+        return None
+    kind = str(node.get("type") or "")
+    if kind not in ("url", "folder"):
+        kind = "url" if node.get("url") else "folder"
+    out = {
+        "name": str(node.get("name") or ""),
+        "type": kind,
+    }
+    if kind == "url":
+        out["url"] = str(node.get("url") or "")
+    else:
+        children = []
+        for child in node.get("children") or []:
+            c_node = _canonical_node(child)
+            if c_node is not None:
+                children.append(c_node)
+        out["children"] = children
+    return out
+
+
+def bookmark_digest(profile_id):
+    if isinstance(profile_id, dict):
+        data = profile_id
+    elif isinstance(profile_id, (bytes, bytearray)):
+        text = profile_id.decode("utf-8").strip()
+        data = json.loads(text) if text else _empty_tree()
+    elif isinstance(profile_id, str) and profile_id.strip().startswith("{"):
+        data = json.loads(profile_id.strip())
+    else:
+        path = _bookmark_path(profile_id)
+        data = _load(path) if path.is_file() else _empty_tree()
+
+    roots = data.get("roots") if isinstance(data, dict) else None
+    if not isinstance(roots, dict):
+        roots = {}
+
+    canonical_roots = {}
+    for key in ROOT_ORDER:
+        node = roots.get(key)
+        if isinstance(node, dict):
+            canonical_roots[key] = _canonical_node(node)
+        else:
+            canonical_roots[key] = {
+                "name": ROOT_LABELS[key],
+                "type": "folder",
+                "children": [],
+            }
+
+    canonical_json_bytes = json.dumps(
+        {
+            "roots": canonical_roots,
+            "version": int(data.get("version") or 1) if isinstance(data, dict) else 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_json_bytes).hexdigest()
+
+
+def save_bookmarks_data(profile_id, data):
+    profile_id = int(profile_id)
+    _require_closed(profile_id)
+    if isinstance(data, (bytes, bytearray)):
+        try:
+            data = json.loads(data.decode("utf-8"))
+        except Exception as error:
+            raise BookmarkError("file bookmark rusak") from error
+    elif isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError as error:
+            raise BookmarkError("file bookmark rusak") from error
+    if not isinstance(data, dict):
+        raise BookmarkError("file bookmark rusak")
+
+    roots = data.get("roots")
+    if not isinstance(roots, dict):
+        roots = {}
+        data["roots"] = roots
+    for key in ROOT_ORDER:
+        node = roots.get(key)
+        if not isinstance(node, dict):
+            roots[key] = {"children": [], "name": ROOT_LABELS[key], "type": "folder"}
+            continue
+        if not isinstance(node.get("children"), list):
+            node["children"] = []
+        if not node.get("name"):
+            node["name"] = ROOT_LABELS[key]
+        if not node.get("type"):
+            node["type"] = "folder"
+    data.setdefault("version", 1)
+    _ensure_ids(roots)
+    path = _bookmark_path(profile_id)
+    _save(path, data)
+    return data
+

@@ -293,6 +293,12 @@ def _ensure_sync_schema(conn):
         ("cookie_blob_id", "TEXT"),
         ("cookie_revision", "INTEGER NOT NULL DEFAULT 0"),
         ("cookie_sha256", "TEXT"),
+        ("bookmark_blob_id", "TEXT"),
+        ("bookmark_revision", "INTEGER NOT NULL DEFAULT 0"),
+        ("bookmark_sha256", "TEXT"),
+        ("password_blob_id", "TEXT"),
+        ("password_revision", "INTEGER NOT NULL DEFAULT 0"),
+        ("password_sha256", "TEXT"),
         ("sync_dirty", "INTEGER NOT NULL DEFAULT 1"),
     ]
     for col_name, col_def in profile_additions:
@@ -312,6 +318,15 @@ def _ensure_sync_schema(conn):
         for col_name, col_def in entity_additions:
             if col_name not in t_cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+        if table == "extensions":
+            for col_name, col_def in (
+                ("archive_blob_id", "TEXT"),
+                ("archive_sha256", "TEXT"),
+            ):
+                if col_name not in t_cols:
+                    conn.execute(
+                        f"ALTER TABLE extensions ADD COLUMN {col_name} {col_def}"
+                    )
         conn.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table} (uuid)"
         )
@@ -488,6 +503,10 @@ def profile_to_dict(row, include_seed=True):
         "deleted_at": row["deleted_at"],
         "cookie_blob_id": _row_val(row, "cookie_blob_id"),
         "cookie_revision": int(_row_val(row, "cookie_revision") or 0),
+        "bookmark_blob_id": _row_val(row, "bookmark_blob_id"),
+        "bookmark_revision": int(_row_val(row, "bookmark_revision") or 0),
+        "password_blob_id": _row_val(row, "password_blob_id"),
+        "password_revision": int(_row_val(row, "password_revision") or 0),
     }
     if include_seed:
         data["seed"] = row["seed"]
@@ -730,6 +749,21 @@ def _template_sync_payload(row, deleted_at=None):
     }
 
 
+def _extension_sync_payload(row, deleted_at=None):
+    ts = now_utc()
+    return {
+        "uuid": _row_val(row, "uuid"),
+        "slug": _row_val(row, "slug"),
+        "title": _row_val(row, "title"),
+        "version": _row_val(row, "version"),
+        "archive_blob_id": _row_val(row, "archive_blob_id"),
+        "archive_sha256": _row_val(row, "archive_sha256"),
+        "created_at": _row_val(row, "created_at") or ts,
+        "updated_at": ts,
+        "deleted_at": deleted_at if deleted_at is not None else _row_val(row, "deleted_at"),
+    }
+
+
 def _profile_sync_payload(conn, row):
     ts = now_utc()
     group_id = int(_row_val(row, "group_id") or 1)
@@ -795,6 +829,10 @@ def _profile_sync_payload(conn, row):
         "last_open_time": _row_val(row, "last_open_time"),
         "cookie_blob_id": _row_val(row, "cookie_blob_id"),
         "cookie_revision": int(_row_val(row, "cookie_revision") or 0),
+        "bookmark_blob_id": _row_val(row, "bookmark_blob_id"),
+        "bookmark_revision": int(_row_val(row, "bookmark_revision") or 0),
+        "password_blob_id": _row_val(row, "password_blob_id"),
+        "password_revision": int(_row_val(row, "password_revision") or 0),
         "created_at": _row_val(row, "created_at") or ts,
         "updated_at": _row_val(row, "updated_at") or ts,
         "deleted_at": _row_val(row, "deleted_at"),
@@ -1398,6 +1436,20 @@ def enqueue_dirty_entities(conn):
             queued.add(("template", row["uuid"]))
             added += 1
 
+    for row in conn.execute("SELECT * FROM extensions WHERE sync_dirty = 1 ORDER BY id").fetchall():
+        if ("extension", row["uuid"]) not in queued:
+            op = "soft_delete" if row["deleted_at"] else "upsert"
+            _enqueue_outbox(
+                conn,
+                "extension",
+                row["uuid"],
+                op,
+                _extension_sync_payload(row),
+                base_revision=int(row["revision"] or 0),
+            )
+            queued.add(("extension", row["uuid"]))
+            added += 1
+
     for row in conn.execute("SELECT * FROM profiles WHERE sync_dirty = 1 ORDER BY id").fetchall():
         if ("profile", row["uuid"]) not in queued:
             op = "soft_delete" if row["deleted_at"] else "upsert"
@@ -1733,6 +1785,8 @@ def apply_remote_change(conn, change):
         slug = str(payload.get("slug") or entity_uuid)
         title = payload.get("title")
         version = payload.get("version")
+        archive_blob_id = payload.get("archive_blob_id")
+        archive_sha256 = payload.get("archive_sha256")
         created_at = payload.get("created_at") or changed_at
         row = conn.execute(
             "SELECT * FROM extensions WHERE uuid = ? OR slug = ? ORDER BY id LIMIT 1",
@@ -1742,18 +1796,58 @@ def apply_remote_change(conn, change):
             conn.execute(
                 """UPDATE extensions
                    SET slug = ?, title = ?, version = ?, uuid = ?, revision = ?,
+                       archive_blob_id = COALESCE(?, archive_blob_id),
+                       archive_sha256 = COALESCE(?, archive_sha256),
                        deleted_at = NULL, origin_device = ?, sync_dirty = 0
                    WHERE id = ?""",
-                (slug, title, version, entity_uuid, revision, origin_device, row["id"]),
+                (
+                    slug,
+                    title,
+                    version,
+                    entity_uuid,
+                    revision,
+                    archive_blob_id,
+                    archive_sha256,
+                    origin_device,
+                    row["id"],
+                ),
             )
         else:
             conn.execute(
                 """INSERT INTO extensions
-                   (slug, title, version, path, created_at, uuid, revision, deleted_at, origin_device, sync_dirty)
-                   VALUES (?,?,?,NULL,?,?,?,NULL,?,0)""",
-                (slug, title, version, created_at, entity_uuid, revision, origin_device),
+                   (slug, title, version, path, created_at, uuid, revision,
+                    archive_blob_id, archive_sha256, deleted_at, origin_device, sync_dirty)
+                   VALUES (?,?,?,NULL,?,?,?,?,?,NULL,?,0)""",
+                (
+                    slug,
+                    title,
+                    version,
+                    created_at,
+                    entity_uuid,
+                    revision,
+                    archive_blob_id,
+                    archive_sha256,
+                    origin_device,
+                ),
             )
         conn.commit()
+
+        if archive_blob_id:
+            from . import extensions, sync_agent
+
+            ext_dir = extensions._extensions_dir(conn) / slug
+            if not ext_dir.is_dir() or not (ext_dir / "manifest.json").is_file():
+                try:
+                    sync_agent.download_and_install_extension(
+                        conn,
+                        slug,
+                        archive_blob_id,
+                        extension_uuid=entity_uuid,
+                        title=title,
+                        version=version,
+                    )
+                except Exception:
+                    pass
         return True
 
     if entity_type == "profile":
@@ -1804,8 +1898,12 @@ def apply_remote_change(conn, change):
         created_at = payload.get("created_at") or changed_at
         updated_at = payload.get("updated_at") or changed_at
         seed_val = int(payload.get("seed") or secrets.randbelow(2**31 - 1) + 1)
-        cookie_blob_id = payload.get("cookie_blob_id")
-        cookie_revision = int(payload.get("cookie_revision") or 0)
+        cookie_blob_id = payload.get("cookie_blob_id") or payload.get("latest_cookie_blob_id")
+        cookie_revision = int(payload.get("cookie_revision") or payload.get("latest_cookie_revision") or 0)
+        bookmark_blob_id = payload.get("bookmark_blob_id") or payload.get("latest_bookmark_blob_id")
+        bookmark_revision = int(payload.get("bookmark_revision") or payload.get("latest_bookmark_revision") or 0)
+        password_blob_id = payload.get("password_blob_id") or payload.get("latest_password_blob_id")
+        password_revision = int(payload.get("password_revision") or payload.get("latest_password_revision") or 0)
         is_self_origin = bool(origin_device and origin_device == get_device_id(conn))
 
         existing = conn.execute(
@@ -1821,6 +1919,18 @@ def apply_remote_change(conn, change):
                 max(cookie_revision, int(existing["cookie_revision"] or 0))
                 if is_self_origin
                 else int(existing["cookie_revision"] or 0)
+            )
+            local_bm_blob = bookmark_blob_id or _row_val(existing, "bookmark_blob_id")
+            local_bm_rev = (
+                max(bookmark_revision, int(_row_val(existing, "bookmark_revision") or 0))
+                if is_self_origin
+                else int(_row_val(existing, "bookmark_revision") or 0)
+            )
+            local_pw_blob = password_blob_id or _row_val(existing, "password_blob_id")
+            local_pw_rev = (
+                max(password_revision, int(_row_val(existing, "password_revision") or 0))
+                if is_self_origin
+                else int(_row_val(existing, "password_revision") or 0)
             )
             conn.execute(
                 """UPDATE profiles SET
@@ -1845,6 +1955,10 @@ def apply_remote_change(conn, change):
                        origin_device = ?,
                        cookie_blob_id = ?,
                        cookie_revision = ?,
+                       bookmark_blob_id = ?,
+                       bookmark_revision = ?,
+                       password_blob_id = ?,
+                       password_revision = ?,
                        sync_dirty = 0
                    WHERE id = ?""",
                 (
@@ -1872,20 +1986,31 @@ def apply_remote_change(conn, change):
                     origin_device,
                     local_cookie_blob,
                     local_cookie_rev,
+                    local_bm_blob,
+                    local_bm_rev,
+                    local_pw_blob,
+                    local_pw_rev,
                     existing["id"],
                 ),
             )
         else:
             init_cookie_blob = cookie_blob_id if is_self_origin else None
             init_cookie_rev = cookie_revision if is_self_origin else 0
+            init_bm_blob = bookmark_blob_id
+            init_bm_rev = bookmark_revision if is_self_origin else 0
+            init_pw_blob = password_blob_id
+            init_pw_rev = password_revision if is_self_origin else 0
             conn.execute(
                 """INSERT INTO profiles
                    (name, group_id, color, note, site_id, site_url,
                     proxy_config, proxy_key, fingerprint_config, preference_config,
                     tag_ids, last_open_time, seed, created_at, updated_at, deleted_at,
                     uuid, revision, origin_device, purged_at,
-                    cookie_blob_id, cookie_revision, sync_dirty)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,0)""",
+                    cookie_blob_id, cookie_revision,
+                    bookmark_blob_id, bookmark_revision,
+                    password_blob_id, password_revision,
+                    sync_dirty)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,0)""",
                 (
                     payload.get("name") or "Profile",
                     group_id,
@@ -1908,6 +2033,10 @@ def apply_remote_change(conn, change):
                     origin_device,
                     init_cookie_blob,
                     init_cookie_rev,
+                    init_bm_blob,
+                    init_bm_rev,
+                    init_pw_blob,
+                    init_pw_rev,
                 ),
             )
         conn.commit()
@@ -1934,6 +2063,72 @@ def apply_remote_change(conn, change):
                     ),
                 )
                 conn.commit()
+        return True
+
+    if entity_type == "bookmark_blob":
+        row = conn.execute(
+            "SELECT id, bookmark_revision FROM profiles WHERE uuid = ?",
+            (entity_uuid,),
+        ).fetchone()
+        if row:
+            if origin_device and origin_device == get_device_id(conn):
+                conn.execute(
+                    """UPDATE profiles
+                       SET bookmark_blob_id = COALESCE(?, bookmark_blob_id),
+                           bookmark_revision = MAX(?, COALESCE(bookmark_revision, 0)),
+                           bookmark_sha256 = COALESCE(?, bookmark_sha256)
+                       WHERE id = ?""",
+                    (
+                        payload.get("blob_id") or payload.get("bookmark_blob_id"),
+                        int(payload.get("bookmark_revision") or revision or 0),
+                        payload.get("sha256_plain"),
+                        row["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """UPDATE profiles
+                       SET bookmark_blob_id = COALESCE(?, bookmark_blob_id)
+                       WHERE id = ?""",
+                    (
+                        payload.get("blob_id") or payload.get("bookmark_blob_id"),
+                        row["id"],
+                    ),
+                )
+            conn.commit()
+        return True
+
+    if entity_type == "password_blob":
+        row = conn.execute(
+            "SELECT id, password_revision FROM profiles WHERE uuid = ?",
+            (entity_uuid,),
+        ).fetchone()
+        if row:
+            if origin_device and origin_device == get_device_id(conn):
+                conn.execute(
+                    """UPDATE profiles
+                       SET password_blob_id = COALESCE(?, password_blob_id),
+                           password_revision = MAX(?, COALESCE(password_revision, 0)),
+                           password_sha256 = COALESCE(?, password_sha256)
+                       WHERE id = ?""",
+                    (
+                        payload.get("blob_id") or payload.get("password_blob_id"),
+                        int(payload.get("password_revision") or revision or 0),
+                        payload.get("sha256_plain"),
+                        row["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    """UPDATE profiles
+                       SET password_blob_id = COALESCE(?, password_blob_id)
+                       WHERE id = ?""",
+                    (
+                        payload.get("blob_id") or payload.get("password_blob_id"),
+                        row["id"],
+                    ),
+                )
+            conn.commit()
         return True
 
     return False

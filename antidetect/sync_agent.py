@@ -10,8 +10,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
-from . import cookies, store, sync_crypto, sync_server
+from . import bookmarks, cookies, extensions, passwords, store, sync_crypto, sync_server
 
 _orig_server_authenticate = getattr(sync_server, "_authenticate", None)
 if callable(_orig_server_authenticate) and not getattr(
@@ -277,6 +278,22 @@ def _prepare_outbox_payload(conn, entity_type, raw_payload, kek, dedupe_key):
                 payload["proxy_fingerprint"] = sync_crypto.proxy_fingerprint(raw_cfg, dedupe_key)
             if kek:
                 payload["proxy_config"] = sync_crypto.encrypt_proxy_config(raw_cfg, kek)
+    elif entity_type == "extension":
+        slug = payload.get("slug")
+        if slug and not payload.get("archive_blob_id") and not payload.get("deleted_at"):
+            try:
+                up_res = upload_extension_blob(
+                    conn,
+                    slug,
+                    extension_uuid=payload.get("uuid"),
+                    kek=kek,
+                )
+                if isinstance(up_res, dict) and up_res.get("blob_id"):
+                    payload["archive_blob_id"] = up_res["blob_id"]
+                    if up_res.get("sha256_plain"):
+                        payload["archive_sha256"] = up_res["sha256_plain"]
+            except Exception:
+                pass
     return payload
 
 
@@ -1084,6 +1101,726 @@ def download_and_inject_cookies(
     )
     conn.commit()
     return True
+
+
+def _resolve_kek(conn, kek=None):
+    if kek is None:
+        kek, _ = store._load_local_crypto(conn)
+    if kek is None:
+        creds = load_credentials(conn=conn)
+        if creds.get("kek_hex"):
+            kek = bytes.fromhex(creds["kek_hex"])
+    if not kek:
+        raise SyncAgentError(
+            "Kunci enkripsi sinkronisasi (KEK) belum tersedia", code=2001
+        )
+    return kek
+
+
+def _resolve_profile_row_and_uuid(conn, profile_id, profile_uuid):
+    prof_row = None
+    if profile_id is not None:
+        prof_row = conn.execute(
+            "SELECT * FROM profiles WHERE id = ?", (int(profile_id),)
+        ).fetchone()
+    if prof_row is None and profile_uuid:
+        prof_row = conn.execute(
+            "SELECT * FROM profiles WHERE uuid = ?", (str(profile_uuid).strip(),)
+        ).fetchone()
+    if prof_row is not None:
+        if profile_id is None:
+            profile_id = prof_row["id"]
+        if not profile_uuid:
+            profile_uuid = prof_row["uuid"]
+    clean_uuid = str(profile_uuid or "").strip()
+    if not clean_uuid:
+        raise SyncAgentError("profile_uuid wajib diisi", code=2003)
+    return prof_row, profile_id, clean_uuid
+
+
+def upload_bookmark_blob(
+    conn,
+    profile_id,
+    profile_uuid=None,
+    fencing_token=None,
+    bookmarks_data=None,
+    server_url=None,
+    token=None,
+    kek=None,
+):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return upload_bookmark_blob(
+                local_conn,
+                profile_id,
+                profile_uuid=profile_uuid,
+                fencing_token=fencing_token,
+                bookmarks_data=bookmarks_data,
+                server_url=server_url,
+                token=token,
+                kek=kek,
+            )
+
+    if isinstance(fencing_token, (dict, list, bytes, bytearray)) or (
+        isinstance(fencing_token, str) and not fencing_token.strip().isdigit()
+    ):
+        if bookmarks_data is None:
+            bookmarks_data = fencing_token
+            fencing_token = None
+        elif isinstance(bookmarks_data, int):
+             bookmarks_data, fencing_token = fencing_token, bookmarks_data
+
+    store._ensure_sync_schema(conn)
+    prof_row, profile_id, clean_uuid = _resolve_profile_row_and_uuid(
+        conn, profile_id, profile_uuid
+    )
+
+    from . import launcher, paths
+
+    conn_profiles_dir = store._conn_db_path(conn).parent / "profiles"
+    prev_profiles_dir = launcher.PROFILES_DIR
+    override_dir = prev_profiles_dir == paths.DATA_DIR / "profiles"
+    if override_dir:
+        launcher.PROFILES_DIR = conn_profiles_dir
+    try:
+        if bookmarks_data is None:
+            bm_path = bookmarks._bookmark_path(profile_id)
+            if not bm_path.is_file():
+                return {
+                    "status": "skipped",
+                    "reason": "no_bookmarks",
+                    "profile_uuid": clean_uuid,
+                }
+            data_obj = bookmarks._load(bm_path)
+        elif isinstance(bookmarks_data, (bytes, bytearray)):
+            data_obj = json.loads(bookmarks_data.decode("utf-8"))
+        elif isinstance(bookmarks_data, str):
+            data_obj = json.loads(bookmarks_data)
+        else:
+            data_obj = dict(bookmarks_data)
+        sha256_plain = bookmarks.bookmark_digest(data_obj)
+    finally:
+        if override_dir:
+            launcher.PROFILES_DIR = prev_profiles_dir
+
+    if (
+        prof_row is not None
+        and store._row_val(prof_row, "bookmark_sha256") == sha256_plain
+        and store._row_val(prof_row, "bookmark_blob_id")
+    ):
+        return {
+            "status": "skipped",
+            "blob_id": prof_row["bookmark_blob_id"],
+            "profile_uuid": clean_uuid,
+            "bookmark_revision": int(prof_row["bookmark_revision"] or 0),
+            "sha256_plain": sha256_plain,
+        }
+
+    resolved_url, resolved_token = _resolve_endpoint(conn, server_url, token)
+    kek = _resolve_kek(conn, kek)
+
+    if fencing_token is None:
+        l_row = conn.execute(
+            "SELECT fencing_token FROM local_leases WHERE profile_uuid = ?",
+            (clean_uuid,),
+        ).fetchone()
+        fencing_token = int(l_row["fencing_token"] or 0) if l_row else 0
+    else:
+        fencing_token = int(fencing_token or 0)
+
+    data_bytes = json.dumps(
+        data_obj, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    next_rev = (
+        int(store._row_val(prof_row, "bookmark_revision") or 0) if prof_row else 0
+    ) + 1
+
+    def _send_upload(rev_num):
+        cipher_env, _, sha256_cipher, size_bytes = sync_crypto.encrypt_blob(
+            data_bytes, kek, clean_uuid, "bookmarks", rev_num
+        )
+        return _post_json(
+            f"{resolved_url}/v1/sync/blob/upload",
+            {
+                "profile_uuid": clean_uuid,
+                "blob_kind": "bookmarks",
+                "fencing_token": fencing_token,
+                "revision": rev_num,
+                "encryption_scheme": "aes-256-gcm-v1",
+                "sha256_plain": sha256_plain,
+                "sha256_cipher": sha256_cipher,
+                "size_bytes": size_bytes,
+                "ciphertext_base64": cipher_env,
+            },
+            token=resolved_token,
+        )
+
+    try:
+        resp = _send_upload(next_rev)
+    except SyncAgentError as retry_err:
+        if (
+            retry_err.code == 2007
+            and isinstance(retry_err.data, dict)
+            and retry_err.data.get("expected_revision")
+        ):
+            next_rev = int(retry_err.data["expected_revision"])
+            resp = _send_upload(next_rev)
+        else:
+            raise
+
+    saved_rev = int(resp.get("bookmark_revision") or resp.get("revision") or next_rev)
+    if profile_id is not None:
+        conn.execute(
+            """UPDATE profiles
+               SET bookmark_blob_id = ?,
+                   bookmark_revision = ?,
+                   bookmark_sha256 = ?
+               WHERE id = ?""",
+            (resp["blob_id"], saved_rev, sha256_plain, int(profile_id)),
+        )
+    else:
+        conn.execute(
+            """UPDATE profiles
+               SET bookmark_blob_id = ?,
+                   bookmark_revision = ?,
+                   bookmark_sha256 = ?
+               WHERE uuid = ?""",
+            (resp["blob_id"], saved_rev, sha256_plain, clean_uuid),
+        )
+    conn.commit()
+    return resp
+
+
+def download_and_inject_bookmarks(
+    conn,
+    profile_id,
+    profile_uuid,
+    blob_id,
+    server_url=None,
+    token=None,
+    kek=None,
+):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return download_and_inject_bookmarks(
+                local_conn,
+                profile_id,
+                profile_uuid,
+                blob_id,
+                server_url=server_url,
+                token=token,
+                kek=kek,
+            )
+
+    store._ensure_sync_schema(conn)
+    clean_blob_id = str(blob_id or "").strip()
+    if not clean_blob_id:
+        raise SyncAgentError("blob_id wajib diisi", code=2003)
+
+    resolved_url, resolved_token = _resolve_endpoint(conn, server_url, token)
+    resp = _post_json(
+        f"{resolved_url}/v1/sync/blob/download",
+        {"blob_id": clean_blob_id},
+        token=resolved_token,
+    )
+    kek = _resolve_kek(conn, kek)
+
+    ciphertext_b64 = resp.get("ciphertext_base64") or ""
+    blob_kind = resp.get("blob_kind") or "bookmarks"
+    revision = int(resp.get("revision") or 1)
+    target_uuid = str(profile_uuid or resp.get("profile_uuid") or "").strip()
+
+    plain_bytes = sync_crypto.decrypt_blob(
+        ciphertext_b64, kek, target_uuid, blob_kind, revision
+    )
+    try:
+        bookmark_data = json.loads(plain_bytes.decode("utf-8"))
+    except Exception as error:
+        raise sync_crypto.SyncCryptoError(
+            "Payload bookmark hasil dekripsi bukan JSON valid"
+        ) from error
+
+    expected_sha256 = str(resp.get("sha256_plain") or "").strip()
+    computed_digest = bookmarks.bookmark_digest(bookmark_data)
+    raw_sha256 = hashlib.sha256(plain_bytes).hexdigest()
+    if expected_sha256 and expected_sha256 not in (computed_digest, raw_sha256):
+        raise sync_crypto.SyncCryptoError("Hash plaintext bookmark tidak cocok")
+
+    from . import launcher, paths
+
+    conn_profiles_dir = store._conn_db_path(conn).parent / "profiles"
+    prev_profiles_dir = launcher.PROFILES_DIR
+    override_dir = prev_profiles_dir == paths.DATA_DIR / "profiles"
+    if override_dir:
+        launcher.PROFILES_DIR = conn_profiles_dir
+    try:
+        bookmarks.save_bookmarks_data(int(profile_id), bookmark_data)
+    finally:
+        if override_dir:
+            launcher.PROFILES_DIR = prev_profiles_dir
+
+    conn.execute(
+        """UPDATE profiles
+           SET bookmark_blob_id = ?,
+               bookmark_revision = ?,
+               bookmark_sha256 = ?
+           WHERE id = ?""",
+        (
+            clean_blob_id,
+            revision,
+            expected_sha256 or computed_digest,
+            int(profile_id),
+        ),
+    )
+    conn.commit()
+    return True
+
+
+def upload_password_blob(
+    conn,
+    profile_id,
+    profile_uuid=None,
+    fencing_token=None,
+    passwords_list=None,
+    server_url=None,
+    token=None,
+    kek=None,
+):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return upload_password_blob(
+                local_conn,
+                profile_id,
+                profile_uuid=profile_uuid,
+                fencing_token=fencing_token,
+                passwords_list=passwords_list,
+                server_url=server_url,
+                token=token,
+                kek=kek,
+            )
+
+    if isinstance(fencing_token, (list, dict, bytes, bytearray)) or (
+        isinstance(fencing_token, str) and not fencing_token.strip().isdigit()
+    ):
+        if passwords_list is None:
+            passwords_list = fencing_token
+            fencing_token = None
+        elif isinstance(passwords_list, int):
+            passwords_list, fencing_token = fencing_token, passwords_list
+
+    store._ensure_sync_schema(conn)
+    prof_row, profile_id, clean_uuid = _resolve_profile_row_and_uuid(
+        conn, profile_id, profile_uuid
+    )
+
+    from . import launcher, paths
+
+    conn_profiles_dir = store._conn_db_path(conn).parent / "profiles"
+    prev_profiles_dir = launcher.PROFILES_DIR
+    override_dir = prev_profiles_dir == paths.DATA_DIR / "profiles"
+    if override_dir:
+        launcher.PROFILES_DIR = conn_profiles_dir
+    try:
+        if passwords_list is None:
+            items = passwords.list_saved_passwords(int(profile_id))
+        else:
+            items = passwords._normalize_password_items(passwords_list)
+    finally:
+        if override_dir:
+            launcher.PROFILES_DIR = prev_profiles_dir
+
+    if not items:
+        return {
+            "status": "skipped",
+            "reason": "empty_passwords",
+            "profile_uuid": clean_uuid,
+        }
+
+    sha256_plain = passwords.password_digest(items)
+    if (
+        prof_row is not None
+        and store._row_val(prof_row, "password_sha256") == sha256_plain
+        and store._row_val(prof_row, "password_blob_id")
+    ):
+        return {
+            "status": "skipped",
+            "blob_id": prof_row["password_blob_id"],
+            "profile_uuid": clean_uuid,
+            "password_revision": int(prof_row["password_revision"] or 0),
+            "sha256_plain": sha256_plain,
+        }
+
+    resolved_url, resolved_token = _resolve_endpoint(conn, server_url, token)
+    kek = _resolve_kek(conn, kek)
+
+    if fencing_token is None:
+        l_row = conn.execute(
+            "SELECT fencing_token FROM local_leases WHERE profile_uuid = ?",
+            (clean_uuid,),
+        ).fetchone()
+        fencing_token = int(l_row["fencing_token"] or 0) if l_row else 0
+    else:
+        fencing_token = int(fencing_token or 0)
+
+    json_bytes = json.dumps(
+        items, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    next_rev = (
+        int(store._row_val(prof_row, "password_revision") or 0) if prof_row else 0
+    ) + 1
+
+    def _send_upload(rev_num):
+        cipher_env, _, sha256_cipher, size_bytes = sync_crypto.encrypt_blob(
+            json_bytes, kek, clean_uuid, "passwords", rev_num
+        )
+        return _post_json(
+            f"{resolved_url}/v1/sync/blob/upload",
+            {
+                "profile_uuid": clean_uuid,
+                "blob_kind": "passwords",
+                "fencing_token": fencing_token,
+                "revision": rev_num,
+                "encryption_scheme": "aes-256-gcm-v1",
+                "sha256_plain": sha256_plain,
+                "sha256_cipher": sha256_cipher,
+                "size_bytes": size_bytes,
+                "ciphertext_base64": cipher_env,
+            },
+            token=resolved_token,
+        )
+
+    try:
+        resp = _send_upload(next_rev)
+    except SyncAgentError as retry_err:
+        if (
+            retry_err.code == 2007
+            and isinstance(retry_err.data, dict)
+            and retry_err.data.get("expected_revision")
+        ):
+            next_rev = int(retry_err.data["expected_revision"])
+            resp = _send_upload(next_rev)
+        else:
+            raise
+
+    saved_rev = int(resp.get("password_revision") or resp.get("revision") or next_rev)
+    if profile_id is not None:
+        conn.execute(
+            """UPDATE profiles
+               SET password_blob_id = ?,
+                   password_revision = ?,
+                   password_sha256 = ?
+               WHERE id = ?""",
+            (resp["blob_id"], saved_rev, sha256_plain, int(profile_id)),
+        )
+    else:
+        conn.execute(
+            """UPDATE profiles
+               SET password_blob_id = ?,
+                   password_revision = ?,
+                   password_sha256 = ?
+               WHERE uuid = ?""",
+            (resp["blob_id"], saved_rev, sha256_plain, clean_uuid),
+        )
+    conn.commit()
+    return resp
+
+
+def download_and_inject_passwords(
+    conn,
+    profile_id,
+    profile_uuid,
+    blob_id,
+    server_url=None,
+    token=None,
+    kek=None,
+):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return download_and_inject_passwords(
+                local_conn,
+                profile_id,
+                profile_uuid,
+                blob_id,
+                server_url=server_url,
+                token=token,
+                kek=kek,
+            )
+
+    store._ensure_sync_schema(conn)
+    clean_blob_id = str(blob_id or "").strip()
+    if not clean_blob_id:
+        raise SyncAgentError("blob_id wajib diisi", code=2003)
+
+    resolved_url, resolved_token = _resolve_endpoint(conn, server_url, token)
+    resp = _post_json(
+        f"{resolved_url}/v1/sync/blob/download",
+        {"blob_id": clean_blob_id},
+        token=resolved_token,
+    )
+    kek = _resolve_kek(conn, kek)
+
+    ciphertext_b64 = resp.get("ciphertext_base64") or ""
+    blob_kind = resp.get("blob_kind") or "passwords"
+    revision = int(resp.get("revision") or 1)
+    target_uuid = str(profile_uuid or resp.get("profile_uuid") or "").strip()
+
+    plain_bytes = sync_crypto.decrypt_blob(
+        ciphertext_b64, kek, target_uuid, blob_kind, revision
+    )
+    try:
+        items = json.loads(plain_bytes.decode("utf-8"))
+    except Exception as error:
+        raise sync_crypto.SyncCryptoError(
+            "Payload password hasil dekripsi bukan JSON valid"
+        ) from error
+
+    expected_sha256 = str(resp.get("sha256_plain") or "").strip()
+    computed_digest = passwords.password_digest(items)
+    raw_sha256 = hashlib.sha256(plain_bytes).hexdigest()
+    if expected_sha256 and expected_sha256 not in (computed_digest, raw_sha256):
+        raise sync_crypto.SyncCryptoError("Hash plaintext password tidak cocok")
+
+    from . import launcher, paths
+
+    conn_profiles_dir = store._conn_db_path(conn).parent / "profiles"
+    prev_profiles_dir = launcher.PROFILES_DIR
+    override_dir = prev_profiles_dir == paths.DATA_DIR / "profiles"
+    if override_dir:
+        launcher.PROFILES_DIR = conn_profiles_dir
+    try:
+        passwords.update_passwords(int(profile_id), items)
+    finally:
+        if override_dir:
+            launcher.PROFILES_DIR = prev_profiles_dir
+
+    conn.execute(
+        """UPDATE profiles
+           SET password_blob_id = ?,
+               password_revision = ?,
+               password_sha256 = ?
+           WHERE id = ?""",
+        (
+            clean_blob_id,
+            revision,
+            expected_sha256 or computed_digest,
+            int(profile_id),
+        ),
+    )
+    conn.commit()
+    return True
+
+
+def upload_extension_blob(
+    conn,
+    extension_slug,
+    extension_uuid=None,
+    server_url=None,
+    token=None,
+    kek=None,
+):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return upload_extension_blob(
+                local_conn,
+                extension_slug,
+                extension_uuid=extension_uuid,
+                server_url=server_url,
+                token=token,
+                kek=kek,
+            )
+
+    store._ensure_sync_schema(conn)
+    clean_slug = str(extension_slug or "").strip()
+    if not clean_slug:
+        raise SyncAgentError("extension_slug wajib diisi", code=2003)
+
+    ext_row = conn.execute(
+        "SELECT * FROM extensions WHERE slug = ? OR uuid = ? ORDER BY id LIMIT 1",
+        (clean_slug, str(extension_uuid or clean_slug)),
+    ).fetchone()
+
+    from . import paths
+
+    conn_ext_dir = store._conn_db_path(conn).parent / "extensions"
+    prev_ext_dir = extensions.EXTENSIONS_DIR
+    override_ext = prev_ext_dir == paths.DATA_DIR / "extensions"
+    if override_ext:
+        extensions.EXTENSIONS_DIR = conn_ext_dir
+    try:
+        archive_bytes, sha256_plain = extensions.get_extension_archive(clean_slug)
+    finally:
+        if override_ext:
+            extensions.EXTENSIONS_DIR = prev_ext_dir
+
+    if ext_row is not None:
+        ext_uuid = str(extension_uuid or ext_row["uuid"] or uuid.uuid4())
+        title = ext_row["title"] or clean_slug
+        version = ext_row["version"] or "1.0"
+        if (
+            store._row_val(ext_row, "archive_sha256") == sha256_plain
+            and store._row_val(ext_row, "archive_blob_id")
+        ):
+            return {
+                "status": "skipped",
+                "blob_id": ext_row["archive_blob_id"],
+                "extension_uuid": ext_uuid,
+                "slug": clean_slug,
+                "revision": int(ext_row["revision"] or 0),
+                "sha256_plain": sha256_plain,
+            }
+        next_rev = int(ext_row["revision"] or 0) + 1
+    else:
+        ext_uuid = str(extension_uuid or uuid.uuid4())
+        title = clean_slug
+        version = "1.0"
+        next_rev = 1
+
+    resolved_url, resolved_token = _resolve_endpoint(conn, server_url, token)
+    kek = _resolve_kek(conn, kek)
+
+    def _send_upload(rev_num):
+        cipher_env, _, sha256_cipher, size_bytes = sync_crypto.encrypt_blob(
+            archive_bytes, kek, ext_uuid, "extension_pkg", rev_num
+        )
+        return _post_json(
+            f"{resolved_url}/v1/sync/blob/upload",
+            {
+                "profile_uuid": ext_uuid,
+                "extension_uuid": ext_uuid,
+                "slug": clean_slug,
+                "title": title,
+                "version": version,
+                "blob_kind": "extension_pkg",
+                "fencing_token": 0,
+                "revision": rev_num,
+                "encryption_scheme": "aes-256-gcm-v1",
+                "sha256_plain": sha256_plain,
+                "sha256_cipher": sha256_cipher,
+                "size_bytes": size_bytes,
+                "ciphertext_base64": cipher_env,
+            },
+            token=resolved_token,
+        )
+
+    try:
+        resp = _send_upload(next_rev)
+    except SyncAgentError as retry_err:
+        if (
+            retry_err.code == 2007
+            and isinstance(retry_err.data, dict)
+            and retry_err.data.get("expected_revision")
+        ):
+            next_rev = int(retry_err.data["expected_revision"])
+            resp = _send_upload(next_rev)
+        else:
+            raise
+
+    saved_rev = int(resp.get("revision") or next_rev)
+    resp["sha256_plain"] = sha256_plain
+    if ext_row is not None:
+        conn.execute(
+            """UPDATE extensions
+               SET uuid = ?,
+                   revision = ?,
+                   archive_blob_id = ?,
+                   archive_sha256 = ?,
+                   sync_dirty = 0
+               WHERE id = ?""",
+            (ext_uuid, saved_rev, resp["blob_id"], sha256_plain, ext_row["id"]),
+        )
+        conn.execute(
+            "DELETE FROM sync_outbox WHERE entity_type = 'extension' AND entity_uuid = ?",
+            (ext_uuid,),
+        )
+        conn.commit()
+    return resp
+
+
+def download_and_install_extension(
+    conn,
+    extension_slug,
+    blob_id,
+    extension_uuid=None,
+    title=None,
+    version=None,
+    server_url=None,
+    token=None,
+    kek=None,
+):
+    if conn is None:
+        store.init()
+        with store.db() as local_conn:
+            return download_and_install_extension(
+                local_conn,
+                extension_slug,
+                blob_id,
+                extension_uuid=extension_uuid,
+                title=title,
+                version=version,
+                server_url=server_url,
+                token=token,
+                kek=kek,
+            )
+
+    store._ensure_sync_schema(conn)
+    clean_slug = str(extension_slug or "").strip()
+    clean_blob_id = str(blob_id or "").strip()
+    if not clean_blob_id:
+        raise SyncAgentError("blob_id wajib diisi", code=2003)
+
+    resolved_url, resolved_token = _resolve_endpoint(conn, server_url, token)
+    resp = _post_json(
+        f"{resolved_url}/v1/sync/blob/download",
+        {"blob_id": clean_blob_id},
+        token=resolved_token,
+    )
+    kek = _resolve_kek(conn, kek)
+
+    ciphertext_b64 = resp.get("ciphertext_base64") or ""
+    blob_kind = resp.get("blob_kind") or "extension_pkg"
+    revision = int(resp.get("revision") or 1)
+    target_uuid = str(
+        extension_uuid or resp.get("profile_uuid") or clean_slug
+    ).strip()
+
+    plain_bytes = sync_crypto.decrypt_blob(
+        ciphertext_b64, kek, target_uuid, blob_kind, revision
+    )
+    expected_sha256 = str(resp.get("sha256_plain") or "").strip()
+    raw_sha256 = hashlib.sha256(plain_bytes).hexdigest()
+    if expected_sha256 and expected_sha256 != raw_sha256:
+        raise sync_crypto.SyncCryptoError("Hash paket ekstensi tidak cocok")
+
+    installed = extensions.install_extension_archive(
+        clean_slug,
+        plain_bytes,
+        title=title,
+        version=version,
+        conn=conn,
+    )
+    conn.execute(
+        """UPDATE extensions
+           SET uuid = COALESCE(uuid, ?),
+               revision = ?,
+               archive_blob_id = ?,
+               archive_sha256 = ?,
+               sync_dirty = 0
+           WHERE slug = ?""",
+        (
+            target_uuid,
+            revision,
+            clean_blob_id,
+            expected_sha256 or raw_sha256,
+            installed["slug"],
+        ),
+    )
+    conn.commit()
+    return installed
 
 
 _heartbeat_lock = threading.Lock()

@@ -1,11 +1,13 @@
 """Local extension storage: upload, list, delete unpacked Chromium extensions."""
 import base64
+import hashlib
 import io
 import json
 import os
 import secrets
 import shutil
 import struct
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -21,6 +23,25 @@ class ExtensionError(Exception):
     pass
 
 
+def _extensions_dir(conn=None):
+    from . import launcher, paths
+
+    if EXTENSIONS_DIR != paths.DATA_DIR / "extensions":
+        return EXTENSIONS_DIR
+    if conn is not None:
+        db_file = store._conn_db_path(conn)
+        if db_file and db_file != store._INITIAL_DB_PATH:
+            return db_file.parent / "extensions"
+    if Path(store.DB_PATH) != store._INITIAL_DB_PATH:
+        return Path(store.DB_PATH).parent / "extensions"
+    if launcher.PROFILES_DIR != paths.DATA_DIR / "profiles":
+        return launcher.PROFILES_DIR.parent / "extensions"
+    env_home = os.environ.get("ANTIDETECT_HOME")
+    if env_home:
+        return Path(env_home) / "extensions"
+    return EXTENSIONS_DIR
+
+
 def _slugify(name):
     slug = "".join(char if char.isalnum() else "-" for char in str(name or "").lower())
     while "--" in slug:
@@ -29,11 +50,12 @@ def _slugify(name):
 
 
 def _unique_slug(base):
+    ext_dir = _extensions_dir()
     with store.db() as conn:
         taken = {row["slug"] for row in conn.execute("SELECT slug FROM extensions")}
     slug = base
     index = 2
-    while slug in taken or (EXTENSIONS_DIR / slug).exists():
+    while slug in taken or (ext_dir / slug).exists():
         slug = f"{base}-{index}"
         index += 1
     return slug
@@ -150,15 +172,16 @@ def upload(filename, content):
         archive = zipfile.ZipFile(io.BytesIO(payload))
     except zipfile.BadZipFile:
         raise ExtensionError("file bukan zip yang valid")
+    ext_dir = _extensions_dir()
     with archive:
         member = _manifest_member(archive.namelist())
         if member is None:
             raise ExtensionError("manifest.json tidak ditemukan di akar zip")
         title, version = _read_manifest(archive, member)
         slug = _unique_slug(_slugify(title))
-        EXTENSIONS_DIR.mkdir(parents=True, exist_ok=True)
-        staging = EXTENSIONS_DIR / f".upload-{os.getpid()}-{secrets.token_hex(4)}"
-        target = EXTENSIONS_DIR / slug
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        staging = ext_dir / f".upload-{os.getpid()}-{secrets.token_hex(4)}"
+        target = ext_dir / slug
         try:
             _extract(archive, member, staging)
             if target.exists():
@@ -168,13 +191,18 @@ def upload(filename, content):
             shutil.rmtree(staging, ignore_errors=True)
             raise
     with store.db() as conn:
+        store._ensure_sync_schema(conn)
+        ext_uuid = str(uuid.uuid4())
+        origin_dev = store.get_device_id(conn)
         cur = conn.execute(
-            "INSERT INTO extensions (slug, title, version, path, created_at) VALUES (?,?,?,?,?)",
-            (slug, title, version, str(target), store.now()),
+            """INSERT INTO extensions
+               (slug, title, version, path, created_at, uuid, revision, deleted_at, origin_device, sync_dirty)
+               VALUES (?,?,?,?,?,?,0,NULL,?,1)""",
+            (slug, title, version, str(target), store.now(), ext_uuid, origin_dev),
         )
         conn.commit()
         extension_id = cur.lastrowid
-    return {"id": extension_id, "slug": slug, "title": title, "version": version}
+    return {"id": extension_id, "slug": slug, "title": title, "version": version, "uuid": ext_uuid}
 
 
 def _dir_size(folder):
@@ -195,6 +223,7 @@ def list_extensions(page=1, limit=10, name=None):
     if name:
         where = "WHERE title LIKE ?"
         args.append(f"%{name}%")
+    ext_dir = _extensions_dir()
     with store.db() as conn:
         total = conn.execute(f"SELECT COUNT(*) AS c FROM extensions {where}", args).fetchone()["c"]
         rows = conn.execute(
@@ -203,7 +232,7 @@ def list_extensions(page=1, limit=10, name=None):
         ).fetchall()
     data = []
     for row in rows:
-        folder = Path(row["path"] or EXTENSIONS_DIR / row["slug"])
+        folder = Path(row["path"] or ext_dir / row["slug"])
         data.append(
             {
                 "id": row["id"],
@@ -237,7 +266,7 @@ def _profiles_using(conn, extension_id):
 
 def _inside_extensions(folder):
     try:
-        Path(folder).resolve().relative_to(EXTENSIONS_DIR.resolve())
+        Path(folder).resolve().relative_to(_extensions_dir().resolve())
         return True
     except (OSError, ValueError):
         return False
@@ -248,6 +277,7 @@ def delete_extension(extension_id):
         extension_id = int(extension_id)
     except (TypeError, ValueError):
         raise ExtensionError("id extension tidak valid")
+    ext_dir = _extensions_dir()
     with store.db() as conn:
         row = conn.execute("SELECT * FROM extensions WHERE id = ?", (extension_id,)).fetchone()
         if row is None:
@@ -257,9 +287,9 @@ def delete_extension(extension_id):
             raise ExtensionError(f"Extension masih dipakai profil {users[0]}")
         conn.execute("DELETE FROM extensions WHERE id = ?", (extension_id,))
         conn.commit()
-    folder = Path(row["path"] or EXTENSIONS_DIR / row["slug"])
+    folder = Path(row["path"] or ext_dir / row["slug"])
     if not _inside_extensions(folder):
-        folder = EXTENSIONS_DIR / str(row["slug"] or "")
+        folder = ext_dir / str(row["slug"] or "")
     shutil.rmtree(folder, ignore_errors=True)
     return True
 
@@ -275,6 +305,7 @@ def extension_paths(ids):
     if not wanted:
         return []
     placeholders = ",".join("?" for _ in wanted)
+    ext_dir = _extensions_dir()
     with store.db() as conn:
         rows = conn.execute(
             f"SELECT id, path, slug FROM extensions WHERE id IN ({placeholders}) ORDER BY id",
@@ -282,7 +313,137 @@ def extension_paths(ids):
         ).fetchall()
     paths = []
     for row in rows:
-        folder = Path(row["path"] or EXTENSIONS_DIR / row["slug"])
+        folder = Path(row["path"] or ext_dir / row["slug"])
         if folder.is_dir() and folder not in paths:
             paths.append(folder)
     return paths
+
+
+def get_extension_archive(slug):
+    """Kemas direktori ekstensi menjadi bytes arsip .zip dan kembalikan (bytes, sha256)."""
+    clean_slug = str(slug or "").strip()
+    if not clean_slug:
+        raise ExtensionError("slug extension wajib diisi")
+    ext_dir = _extensions_dir()
+    candidates = [ext_dir / clean_slug, EXTENSIONS_DIR / clean_slug]
+    try:
+        with store.db() as conn:
+            row = conn.execute(
+                "SELECT path FROM extensions WHERE slug = ?", (clean_slug,)
+            ).fetchone()
+            if row and row["path"]:
+                candidates.insert(0, Path(row["path"]))
+    except Exception:
+        pass
+
+    folder = None
+    for cand in candidates:
+        if cand.is_dir():
+            folder = cand
+            break
+    if folder is None:
+        raise ExtensionError(f"ekstensi {clean_slug} tidak ditemukan")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(folder):
+            dirs.sort()
+            files.sort()
+            for file_name in files:
+                full_path = Path(root) / file_name
+                rel_path = full_path.relative_to(folder).as_posix()
+                zf.write(full_path, arcname=rel_path)
+    archive_bytes = buf.getvalue()
+    sha256_hex = hashlib.sha256(archive_bytes).hexdigest()
+    return archive_bytes, sha256_hex
+
+
+def install_extension_archive(slug, archive_bytes, title=None, version=None, conn=None):
+    """Ekstrak arsip zip ke EXTENSIONS_DIR / slug dan pastikan tercatat di tabel extensions."""
+    clean_slug = str(slug or "").strip()
+    if isinstance(archive_bytes, str):
+        raw_bytes = _decode(archive_bytes)
+    elif isinstance(archive_bytes, (bytes, bytearray)):
+        raw_bytes = bytes(archive_bytes)
+    else:
+        raise ExtensionError("isi arsip extension tidak valid")
+
+    payload = _zip_payload(f"{clean_slug or 'extension'}.zip", raw_bytes)
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile as error:
+        raise ExtensionError("file bukan zip yang valid") from error
+
+    ext_dir = _extensions_dir(conn)
+    with archive:
+        member = _manifest_member(archive.namelist())
+        if member is not None:
+            manifest_title, manifest_version = _read_manifest(archive, member)
+            if not title:
+                title = manifest_title
+            if not version:
+                version = manifest_version
+        else:
+            member = "manifest.json"
+        if not title:
+            title = clean_slug or "Extension"
+        if not version:
+            version = "1.0"
+        if not clean_slug:
+            clean_slug = _slugify(title)
+
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        staging = ext_dir / f".install-{os.getpid()}-{secrets.token_hex(4)}"
+        target = ext_dir / clean_slug
+        try:
+            _extract(archive, member, staging)
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.move(str(staging), str(target))
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+    def _register(db_conn):
+        store._ensure_sync_schema(db_conn)
+        existing = db_conn.execute(
+            "SELECT * FROM extensions WHERE slug = ?", (clean_slug,)
+        ).fetchone()
+        if existing:
+            db_conn.execute(
+                """UPDATE extensions
+                   SET title = COALESCE(?, title),
+                       version = COALESCE(?, version),
+                       path = ?
+                   WHERE id = ?""",
+                (title, version, str(target), existing["id"]),
+            )
+            ext_id = existing["id"]
+        else:
+            ext_uuid = str(uuid.uuid4())
+            origin_dev = store.get_device_id(db_conn)
+            cur = db_conn.execute(
+                """INSERT INTO extensions
+                   (slug, title, version, path, created_at, uuid, revision, deleted_at, origin_device, sync_dirty)
+                   VALUES (?,?,?,?,?,?,1,NULL,?,0)""",
+                (clean_slug, title, version, str(target), store.now(), ext_uuid, origin_dev),
+            )
+            ext_id = cur.lastrowid
+        return ext_id
+
+    if conn is not None:
+        ext_id = _register(conn)
+        conn.commit()
+    else:
+        with store.db() as local_conn:
+            ext_id = _register(local_conn)
+            local_conn.commit()
+
+    return {
+        "id": ext_id,
+        "slug": clean_slug,
+        "title": title,
+        "version": version,
+        "path": str(target),
+    }
+
