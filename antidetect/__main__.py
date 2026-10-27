@@ -33,7 +33,7 @@ def _proxy_config(raw):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="antidetect")
+    parser = argparse.ArgumentParser(prog="cloakdesk")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_serve = sub.add_parser("serve", help="run the local API")

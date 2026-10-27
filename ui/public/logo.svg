@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="50%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#070a10" />
+    </linearGradient>
+
+    <!-- Glowing Rim Gradient -->
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.6" />
+      <stop offset="50%" stop-color="#6366f1" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#1e293b" stop-opacity="0.8" />
+    </linearGradient>
+
+    <!-- Cloak Gradient -->
+    <linearGradient id="cloakGrad" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="40%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+
+    <!-- Cloak Highlight (Cyan/Violet edge) -->
+    <linearGradient id="edgeGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#818cf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <!-- Browser Glass Gradient -->
+    <linearGradient id="browserGlass" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#0f172a" stop-opacity="0.95" />
+    </linearGradient>
+
+    <!-- Browser Topbar Gradient -->
+    <linearGradient id="browserBar" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#334155" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+
+    <!-- Cyan Glow Filter -->
+    <filter id="cyanGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Soft Shadow Filter -->
+    <filter id="dropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.6" />
+    </filter>
+  </defs>
+
+  <!-- App Squircle Icon Background -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="4" />
+
+  <!-- Subtle Background Grid Effect -->
+  <g opacity="0.07" stroke="#38bdf8" stroke-width="1.5">
+    <line x1="60" y1="120" x2="452" y2="120" />
+    <line x1="60" y1="200" x2="452" y2="200" />
+    <line x1="60" y1="280" x2="452" y2="280" />
+    <line x1="60" y1="360" x2="452" y2="360" />
+    <line x1="140" y1="60" x2="140" y2="452" />
+    <line x1="220" y1="60" x2="220" y2="452" />
+    <line x1="300" y1="60" x2="300" y2="452" />
+    <line x1="380" y1="60" x2="380" y2="452" />
+  </g>
+
+  <!-- ================= BROWSER WINDOW (Right / Background Layer) ================= -->
+  <g filter="url(#dropShadow)" transform="translate(195, 110)">
+    <!-- Browser Container Box -->
+    <rect x="0" y="0" width="245" height="300" rx="16" fill="url(#browserGlass)" stroke="#38bdf8" stroke-width="2.5" stroke-opacity="0.8" />
+
+    <!-- Browser Header Bar -->
+    <path d="M 0,16 Q 0,0 16,0 L 229,0 Q 245,0 245,16 L 245,38 L 0,38 Z" fill="url(#browserBar)" />
+
+    <!-- macOS Traffic Lights -->
+    <circle cx="16" cy="19" r="4.5" fill="#ef4444" />
+    <circle cx="30" cy="19" r="4.5" fill="#f59e0b" />
+    <circle cx="44" cy="19" r="4.5" fill="#10b981" />
+
+    <!-- Browser Address Bar Pill -->
+    <rect x="62" y="10" width="168" height="18" rx="9" fill="#0f172a" stroke="#475569" stroke-width="1" />
+    <!-- Lock Icon in URL -->
+    <path d="M 74,19 L 78,19 L 78,24 L 74,24 Z M 75,19 L 75,17 Q 75,15.5 76,15.5 Q 77,15.5 77,17 L 77,19" fill="none" stroke="#38bdf8" stroke-width="1.2" />
+    <line x1="84" y1="19" x2="145" y2="19" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" />
+
+    <!-- Web Content Area -->
+    <!-- Tab Indicator Line -->
+    <line x1="16" y1="58" x2="180" y2="58" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" opacity="0.6" />
+
+    <!-- Shield / Stealth Symbol inside viewport -->
+    <g transform="translate(90, 115)" opacity="0.85">
+      <path d="M 32,0 L 60,12 L 60,38 Q 60,65 32,78 Q 4,65 4,38 L 4,12 Z" fill="#0f172a" stroke="#38bdf8" stroke-width="2" />
+      <!-- Fingerprint / Lock inside shield -->
+      <path d="M 22,35 A 10,10 0 0,1 42,35" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" />
+      <path d="M 18,44 A 15,15 0 0,1 46,44" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" />
+      <path d="M 25,53 A 8,8 0 0,1 39,53" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" />
+      <circle cx="32" cy="35" r="2.5" fill="#38bdf8" />
+    </g>
+
+    <!-- Subtle Content Skeleton Lines -->
+    <rect x="24" y="225" width="197" height="8" rx="4" fill="#334155" opacity="0.6" />
+    <rect x="24" y="245" width="140" height="8" rx="4" fill="#334155" opacity="0.4" />
+    <rect x="24" y="265" width="90" height="8" rx="4" fill="#334155" opacity="0.3" />
+  </g>
+
+  <!-- ================= CLOAKED / GRIM REAPER FIGURE (Left / Foreground Layer) ================= -->
+  <g filter="url(#dropShadow)" transform="translate(68, 78)">
+    <!-- Aura Glow behind Hood -->
+    <path d="M 115,28 Q 170,45 185,120 Q 200,210 205,320 L 35,320 Q 40,210 55,120 Q 70,45 115,28 Z" fill="none" stroke="#38bdf8" stroke-width="12" opacity="0.18" filter="url(#cyanGlow)" />
+
+    <!-- Main Outer Cloak Silhouette -->
+    <path d="M 115,30
+             C 145,30 178,55 186,105
+             C 196,165 208,245 220,335
+             C 195,330 160,336 125,334
+             C 90,336 55,330 20,335
+             C 32,245 44,165 54,105
+             C 62,55 85,30 115,30 Z"
+          fill="url(#cloakGrad)"
+          stroke="url(#edgeGlow)"
+          stroke-width="3" />
+
+    <!-- Hood Crest Point (Reaper Style Cowl Tip) -->
+    <path d="M 115,18 L 126,38 L 104,38 Z" fill="url(#edgeGlow)" />
+    <path d="M 115,18 Q 115,45 130,65" fill="none" stroke="#38bdf8" stroke-width="2" />
+
+    <!-- Cloak Shoulder & Chest Folds -->
+    <path d="M 52,118 Q 80,145 115,145 Q 150,145 178,118" fill="none" stroke="#38bdf8" stroke-width="2" opacity="0.5" />
+    <path d="M 68,165 Q 92,205 115,210 Q 138,205 162,165" fill="none" stroke="#818cf8" stroke-width="2" opacity="0.4" />
+    <path d="M 115,145 L 115,330" fill="none" stroke="#1e293b" stroke-width="2.5" />
+    <path d="M 85,195 L 70,332" fill="none" stroke="#1e293b" stroke-width="1.8" />
+    <path d="M 145,195 L 160,332" fill="none" stroke="#1e293b" stroke-width="1.8" />
+
+    <!-- Inner Hood Void (Deep Darkness) -->
+    <path d="M 115,48
+             C 88,48 74,75 72,110
+             C 70,142 88,155 115,155
+             C 142,155 160,142 158,110
+             C 156,75 142,48 115,48 Z"
+          fill="#020617"
+          stroke="#0f172a"
+          stroke-width="2" />
+
+    <!-- Glowing Cyan Reaper Eyes (Slanted sharp slit eyes) -->
+    <g filter="url(#cyanGlow)">
+      <!-- Left Eye -->
+      <path d="M 90,102 Q 101,104 106,108 Q 98,110 88,105 Z" fill="#38bdf8" />
+      <circle cx="98" cy="105" r="1.5" fill="#ffffff" />
+
+      <!-- Right Eye -->
+      <path d="M 140,102 Q 129,104 124,108 Q 132,110 142,105 Z" fill="#38bdf8" />
+      <circle cx="132" cy="105" r="1.5" fill="#ffffff" />
+    </g>
+
+    <!-- Cloak Drape overlapping Browser Window -->
+    <path d="M 186,105 Q 215,150 220,240 Q 200,230 185,215 Z" fill="#0f172a" opacity="0.6" />
+  </g>
+</svg>

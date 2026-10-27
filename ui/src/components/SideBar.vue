@@ -28,8 +28,8 @@ function isActive(path) {
 <template>
   <aside :class="['ix-sidebar', { collapsed }]">
     <div class="side-logo">
-      <div class="brand-mark">A</div>
-      <span v-if="!collapsed" class="brand-word">Antidetect</span>
+      <img src="/favicon.svg" alt="CloakDesk Logo" class="brand-logo" />
+      <span v-if="!collapsed" class="brand-word">CloakDesk</span>
     </div>
 
     <nav class="side-nav">

@@ -130,6 +130,15 @@ button {
   flex: 0 0 28px;
 }
 
+.brand-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--ix-radius);
+  flex: 0 0 28px;
+  object-fit: contain;
+  display: block;
+}
+
 .brand-word {
   font-size: 15px;
   font-weight: 600;
