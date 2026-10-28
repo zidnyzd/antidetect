@@ -2,24 +2,41 @@
 # CloakDesk Standalone Desktop App Launcher
 set -e
 
+# Pastikan PATH menyertakan lokasi biner lokal pengguna pada sesi GUI desktop
+export PATH="$HOME/.local/bin:$HOME/.local/share/lerd/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export DISPLAY="${DISPLAY:-:0}"
+
 # Cari direktori root CloakDesk yang valid
-if [ -f "/home/zdna/Projects/cloakdesk/ui/electron-main.cjs" ]; then
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+CANDIDATE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [ -f "$CANDIDATE_DIR/ui/electron-main.cjs" ] && [ -d "$CANDIDATE_DIR/antidetect" ]; then
+    PROJECT_DIR="$CANDIDATE_DIR"
+elif [ -f "/home/zdna/Projects/cloakdesk/ui/electron-main.cjs" ]; then
     PROJECT_DIR="/home/zdna/Projects/cloakdesk"
 elif [ -f "/opt/cloakdesk/ui/electron-main.cjs" ]; then
     PROJECT_DIR="/opt/cloakdesk"
 else
-    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-    PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    PROJECT_DIR="$CANDIDATE_DIR"
 fi
 
 PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ] && [ -x "/home/zdna/Projects/cloakdesk/venv/bin/python" ]; then
+    PYTHON_BIN="/home/zdna/Projects/cloakdesk/venv/bin/python"
+fi
 
 # 0. Jika dipanggil dengan argumen subperintah CLI (misal: cloakdesk sync, cloakdesk list)
 if [ "$#" -gt 0 ]; then
-    PY="/usr/bin/python3"
-    [ -x "$PYTHON_BIN" ] && PY="$PYTHON_BIN"
-    export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
-    exec "$PY" -m antidetect "$@"
+    case "$1" in
+        -*)
+            ;;
+        *)
+            PY="/usr/bin/python3"
+            [ -x "$PYTHON_BIN" ] && PY="$PYTHON_BIN"
+            export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
+            exec "$PY" -m antidetect "$@"
+            ;;
+    esac
 fi
 
 # 1. Pastikan backend CloakDesk aktif di port 53200
@@ -28,17 +45,23 @@ if ! curl -s -m 1 http://127.0.0.1:53200/health >/dev/null 2>&1; then
     [ -x "$PYTHON_BIN" ] && PY="$PYTHON_BIN"
     export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
     nohup "$PY" -m antidetect serve >/dev/null 2>&1 &
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 25); do
         if curl -s -m 1 http://127.0.0.1:53200/health >/dev/null 2>&1; then
             break
         fi
-        sleep 0.2
+        sleep 0.1
     done
 fi
 
-# 2. Prioritaskan runtime Electron mandiri (100% standalone native seperti ixBrowser)
+# 2. Prioritaskan biner ELF native Electron langsung (tanpa ketergantungan shebang node)
 ELECTRON_BIN=""
-if [ -x "$PROJECT_DIR/ui/node_modules/.bin/electron" ]; then
+if [ -x "$PROJECT_DIR/ui/node_modules/electron/dist/electron" ]; then
+    ELECTRON_BIN="$PROJECT_DIR/ui/node_modules/electron/dist/electron"
+elif [ -x "/home/zdna/Projects/cloakdesk/ui/node_modules/electron/dist/electron" ]; then
+    ELECTRON_BIN="/home/zdna/Projects/cloakdesk/ui/node_modules/electron/dist/electron"
+elif [ -x "/opt/cloakdesk/ui/node_modules/electron/dist/electron" ]; then
+    ELECTRON_BIN="/opt/cloakdesk/ui/node_modules/electron/dist/electron"
+elif [ -x "$PROJECT_DIR/ui/node_modules/.bin/electron" ]; then
     ELECTRON_BIN="$PROJECT_DIR/ui/node_modules/.bin/electron"
 elif [ -x "/home/zdna/Projects/cloakdesk/ui/node_modules/.bin/electron" ]; then
     ELECTRON_BIN="/home/zdna/Projects/cloakdesk/ui/node_modules/.bin/electron"
@@ -51,8 +74,17 @@ if [ ! -f "$MAIN_CJS" ] && [ -f "/home/zdna/Projects/cloakdesk/ui/electron-main.
     MAIN_CJS="/home/zdna/Projects/cloakdesk/ui/electron-main.cjs"
 fi
 
+export CHROME_DESKTOP="CloakDesk.desktop"
+if [ -z "$BAMF_DESKTOP_FILE_HINT" ]; then
+    if [ -f "/usr/share/applications/cloakdesk.desktop" ]; then
+        export BAMF_DESKTOP_FILE_HINT="/usr/share/applications/cloakdesk.desktop"
+    elif [ -f "$HOME/.local/share/applications/cloakdesk.desktop" ]; then
+        export BAMF_DESKTOP_FILE_HINT="$HOME/.local/share/applications/cloakdesk.desktop"
+    fi
+fi
+
 if [ -n "$ELECTRON_BIN" ] && [ -f "$MAIN_CJS" ]; then
-    exec "$ELECTRON_BIN" "$MAIN_CJS" "$@"
+    exec "$ELECTRON_BIN" "$MAIN_CJS" --class=CloakDesk --name=CloakDesk "$@"
 fi
 
 # Fallback ke browser jika Electron belum terpasang

@@ -33,9 +33,11 @@ echo "=== 3. Menyalin berkas aplikasi ==="
 cp -a "$PROJECT_DIR/antidetect/"* "$STAGING_DIR/opt/cloakdesk/antidetect/"
 find "$STAGING_DIR/opt/cloakdesk/antidetect" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 cp -a "$PROJECT_DIR/ui/dist/"* "$STAGING_DIR/opt/cloakdesk/ui/dist/"
+cp "$PROJECT_DIR/ui/electron-main.cjs" "$STAGING_DIR/opt/cloakdesk/ui/"
 cp "$PROJECT_DIR/assets/cloakdesk-logo.png" "$STAGING_DIR/opt/cloakdesk/assets/"
 cp "$PROJECT_DIR/assets/cloakdesk-logo.svg" "$STAGING_DIR/opt/cloakdesk/assets/"
 cp "$PROJECT_DIR/scripts/fetch-gost.sh" "$STAGING_DIR/opt/cloakdesk/scripts/" 2>/dev/null || true
+cp "$PROJECT_DIR/scripts/cloakdesk-app.sh" "$STAGING_DIR/opt/cloakdesk/scripts/"
 
 # Ikon sistem
 cp "$PROJECT_DIR/assets/cloakdesk-logo.png" "$STAGING_DIR/usr/share/icons/hicolor/512x512/apps/cloakdesk.png"
@@ -62,61 +64,7 @@ Exec=/usr/bin/cloakdesk
 EOF
 
 # Executable /usr/bin/cloakdesk
-cat <<'EOF' > "$STAGING_DIR/usr/bin/cloakdesk"
-#!/bin/bash
-set -e
-
-# CloakDesk CLI & Desktop Launcher
-CLOAKDESK_DIR="/opt/cloakdesk"
-export PYTHONPATH="$CLOAKDESK_DIR:$PYTHONPATH"
-
-# Jika dipanggil dengan argumen subperintah CLI (misal: cloakdesk serve, cloakdesk list)
-if [ "$#" -gt 0 ]; then
-    exec /usr/bin/python3 -m antidetect "$@"
-fi
-
-# Jika dipanggil tanpa argumen: mode Desktop GUI
-# 1. Pastikan backend server aktif
-if ! curl -s -m 1 http://127.0.0.1:53200/health >/dev/null 2>&1; then
-    nohup /usr/bin/python3 -m antidetect serve >/dev/null 2>&1 &
-    for _ in $(seq 1 30); do
-        if curl -s -m 1 http://127.0.0.1:53200/health >/dev/null 2>&1; then
-            break
-        fi
-        sleep 0.2
-    done
-fi
-
-# 2. Cari runtime browser untuk jendela aplikasi mandiri
-APP_BROWSER=""
-if [ -x "/opt/brave.com/brave-origin/brave" ]; then
-    APP_BROWSER="/opt/brave.com/brave-origin/brave"
-elif command -v brave-browser >/dev/null 2>&1; then
-    APP_BROWSER="$(command -v brave-browser)"
-elif command -v google-chrome >/dev/null 2>&1; then
-    APP_BROWSER="$(command -v google-chrome)"
-elif command -v chromium-browser >/dev/null 2>&1; then
-    APP_BROWSER="$(command -v chromium-browser)"
-elif command -v chromium >/dev/null 2>&1; then
-    APP_BROWSER="$(command -v chromium)"
-fi
-
-URL="http://127.0.0.1:53200/#/profiles"
-USER_DATA="$HOME/.config/cloakdesk/app-shell"
-mkdir -p "$USER_DATA"
-
-if [ -n "$APP_BROWSER" ]; then
-    exec "$APP_BROWSER" \
-        --app="$URL" \
-        --class="CloakDesk" \
-        --name="CloakDesk" \
-        --user-data-dir="$USER_DATA" \
-        --window-size=1280,820 \
-        "$@"
-else
-    exec xdg-open "$URL"
-fi
-EOF
+cp "$PROJECT_DIR/scripts/cloakdesk-app.sh" "$STAGING_DIR/usr/bin/cloakdesk"
 chmod 755 "$STAGING_DIR/usr/bin/cloakdesk"
 
 # Berkas kontrol paket Debian
