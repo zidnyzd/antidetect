@@ -1,23 +1,83 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Fold, Expand, Refresh } from '@element-plus/icons-vue'
+import { Fold, Expand, Refresh, Sunny, Moon } from '@element-plus/icons-vue'
 import SideBar from './components/SideBar.vue'
 import { api } from './api'
 import { useRefreshSignal } from './refresh'
 
 const STORAGE_KEY = 'antidetect.sidebar.collapsed'
+const THEME_STORAGE_KEY = 'cloakdesk.theme'
+const VALID_THEMES = ['auto', 'dark', 'light']
+
+function readStoredTheme() {
+  const raw = localStorage.getItem(THEME_STORAGE_KEY)
+  return VALID_THEMES.includes(raw) ? raw : 'auto'
+}
+
+const mediaQuery =
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-color-scheme: dark)')
+    : null
 
 const route = useRoute()
 const router = useRouter()
 const collapsed = ref(localStorage.getItem(STORAGE_KEY) === '1')
+const themeMode = ref(readStoredTheme())
+const systemDark = ref(mediaQuery ? mediaQuery.matches : false)
 const clock = ref('')
 const apiOk = ref(false)
 const spinning = ref(false)
 const syncStatus = ref(null)
 const syncSpinning = ref(false)
 const refreshTick = useRefreshSignal()
+
+const isDark = computed(
+  () => themeMode.value === 'dark' || (themeMode.value === 'auto' && systemDark.value)
+)
+
+function syncDocumentTheme() {
+  document.documentElement.classList.toggle('dark', isDark.value)
+}
+
+function setThemeMode(mode, notify = true) {
+  const next = VALID_THEMES.includes(mode) ? mode : 'auto'
+  themeMode.value = next
+  localStorage.setItem(THEME_STORAGE_KEY, next)
+  syncDocumentTheme()
+  if (notify && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('cloakdesk:theme-change', { detail: next }))
+  }
+}
+
+function toggleTheme() {
+  setThemeMode(isDark.value ? 'light' : 'dark')
+}
+
+const themeTooltip = computed(() => {
+  const activeText =
+    themeMode.value === 'auto'
+      ? `Otomatis (${isDark.value ? 'Gelap' : 'Terang'})`
+      : isDark.value
+        ? 'Mode Gelap'
+        : 'Mode Terang'
+  const actionText = isDark.value ? 'Beralih ke Mode Terang' : 'Beralih ke Mode Gelap'
+  return `${activeText} · ${actionText}`
+})
+
+syncDocumentTheme()
+
+watch(isDark, () => {
+  syncDocumentTheme()
+})
+
+provide('cloakdeskTheme', {
+  themeMode,
+  isDark,
+  setThemeMode,
+  toggleTheme,
+})
 
 const crumb = computed(() => route.meta.crumb || 'Ringkasan')
 const section = computed(() => route.meta.section || 'Profil Browser')
@@ -133,11 +193,42 @@ function requestRefresh() {
   refreshTick.value += 1
 }
 
+function handleSystemThemeChange(event) {
+  systemDark.value = Boolean(event.matches)
+  syncDocumentTheme()
+}
+
+function handleExternalThemeChange(event) {
+  const next = event?.detail || readStoredTheme()
+  if (VALID_THEMES.includes(next) && themeMode.value !== next) {
+    themeMode.value = next
+  }
+  syncDocumentTheme()
+}
+
+function handleStorageChange(event) {
+  if (event.key === THEME_STORAGE_KEY) {
+    themeMode.value = readStoredTheme()
+    syncDocumentTheme()
+  }
+}
+
 watch(refreshTick, () => {
   checkSyncStatus()
 })
 
 onMounted(() => {
+  if (mediaQuery) {
+    systemDark.value = mediaQuery.matches
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', handleSystemThemeChange)
+    } else if (typeof mediaQuery.addListener === 'function') {
+      mediaQuery.addListener(handleSystemThemeChange)
+    }
+  }
+  window.addEventListener('cloakdesk:theme-change', handleExternalThemeChange)
+  window.addEventListener('storage', handleStorageChange)
+  syncDocumentTheme()
   tickClock()
   clockTimer = setInterval(tickClock, 1000)
   checkHealth()
@@ -147,6 +238,15 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (mediaQuery) {
+    if (typeof mediaQuery.removeEventListener === 'function') {
+      mediaQuery.removeEventListener('change', handleSystemThemeChange)
+    } else if (typeof mediaQuery.removeListener === 'function') {
+      mediaQuery.removeListener(handleSystemThemeChange)
+    }
+  }
+  window.removeEventListener('cloakdesk:theme-change', handleExternalThemeChange)
+  window.removeEventListener('storage', handleStorageChange)
   clearInterval(clockTimer)
   clearInterval(healthTimer)
   clearInterval(syncTimer)
@@ -212,6 +312,16 @@ onUnmounted(() => {
             <span class="clock-time">{{ clock }}</span>
             <span class="clock-zone">WIB</span>
           </div>
+          <el-tooltip :content="themeTooltip" placement="bottom" :show-after="200">
+            <button
+              type="button"
+              class="icon-button theme-toggle-button"
+              :aria-label="isDark ? 'Beralih ke mode terang' : 'Beralih ke mode gelap'"
+              @click="toggleTheme"
+            >
+              <el-icon><Sunny v-if="isDark" /><Moon v-else /></el-icon>
+            </button>
+          </el-tooltip>
           <el-tooltip content="Muat ulang data" placement="bottom" :show-after="200">
             <button type="button" class="icon-button" aria-label="Muat ulang data" @click="requestRefresh">
               <el-icon :class="{ spinning }"><Refresh /></el-icon>

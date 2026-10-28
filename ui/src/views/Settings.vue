@@ -1,8 +1,25 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, inject, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, UI_VERSION } from '../api'
 import { useOnRefresh, useRefreshSignal } from '../refresh'
+
+const THEME_STORAGE_KEY = 'cloakdesk.theme'
+const VALID_THEMES = ['auto', 'dark', 'light']
+
+function readStoredTheme() {
+  const raw = localStorage.getItem(THEME_STORAGE_KEY)
+  return VALID_THEMES.includes(raw) ? raw : 'auto'
+}
+
+const injectedTheme = inject('cloakdeskTheme', null)
+const mediaQuery =
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-color-scheme: dark)')
+    : null
+
+const localThemeMode = ref(readStoredTheme())
+const systemDark = ref(mediaQuery ? mediaQuery.matches : false)
 
 const health = ref(null)
 const healthError = ref('')
@@ -177,19 +194,117 @@ async function resolveConflict(conflictId, resolution) {
   }
 }
 
+function applyLocalTheme(mode) {
+  const next = VALID_THEMES.includes(mode) ? mode : 'auto'
+  localThemeMode.value = next
+  localStorage.setItem(THEME_STORAGE_KEY, next)
+  const dark = next === 'dark' || (next === 'auto' && (mediaQuery ? mediaQuery.matches : false))
+  document.documentElement.classList.toggle('dark', dark)
+}
+
+function updateThemeMode(mode) {
+  const next = VALID_THEMES.includes(mode) ? mode : 'auto'
+  applyLocalTheme(next)
+  if (injectedTheme?.setThemeMode) {
+    injectedTheme.setThemeMode(next)
+  } else if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('cloakdesk:theme-change', { detail: next }))
+  }
+}
+
+const themeMode = computed({
+  get() {
+    return injectedTheme?.themeMode ? injectedTheme.themeMode.value : localThemeMode.value
+  },
+  set(val) {
+    updateThemeMode(val)
+  },
+})
+
+const isDarkActive = computed(() => {
+  if (injectedTheme?.isDark) return injectedTheme.isDark.value
+  return localThemeMode.value === 'dark' || (localThemeMode.value === 'auto' && systemDark.value)
+})
+
+const activeThemeLabel = computed(() => {
+  if (themeMode.value === 'auto') {
+    return `Otomatis · ${isDarkActive.value ? 'Gelap' : 'Terang'}`
+  }
+  return isDarkActive.value ? 'Mode Gelap Aktif' : 'Mode Terang Aktif'
+})
+
+function handleSystemThemeChange(event) {
+  systemDark.value = Boolean(event.matches)
+  if (!injectedTheme) {
+    applyLocalTheme(localThemeMode.value)
+  }
+}
+
+function handleExternalThemeChange(event) {
+  const next = event?.detail || readStoredTheme()
+  if (VALID_THEMES.includes(next)) {
+    localThemeMode.value = next
+  }
+}
+
 async function load() {
   loading.value = true
   await Promise.all([loadHealth(), loadProfileTotal(), loadEngine(), loadSync()])
   loading.value = false
 }
 
-onMounted(load)
+onMounted(() => {
+  if (mediaQuery) {
+    systemDark.value = mediaQuery.matches
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', handleSystemThemeChange)
+    } else if (typeof mediaQuery.addListener === 'function') {
+      mediaQuery.addListener(handleSystemThemeChange)
+    }
+  }
+  window.addEventListener('cloakdesk:theme-change', handleExternalThemeChange)
+  load()
+})
+
+onUnmounted(() => {
+  if (mediaQuery) {
+    if (typeof mediaQuery.removeEventListener === 'function') {
+      mediaQuery.removeEventListener('change', handleSystemThemeChange)
+    } else if (typeof mediaQuery.removeListener === 'function') {
+      mediaQuery.removeListener(handleSystemThemeChange)
+    }
+  }
+  window.removeEventListener('cloakdesk:theme-change', handleExternalThemeChange)
+})
+
 useOnRefresh(() => load())
 </script>
 
 <template>
   <div v-loading="loading" element-loading-text="Memuat informasi..." class="settings-page">
     <div class="settings-grid">
+      <section class="info-card theme-card">
+        <div class="sync-card-head">
+          <div class="info-label">Tema Tampilan</div>
+          <span class="sync-pill is-idle">{{ activeThemeLabel }}</span>
+        </div>
+        <div class="theme-options">
+          <el-radio-group
+            v-model="themeMode"
+            size="small"
+            class="status-segment theme-segment"
+            aria-label="Tema Tampilan"
+          >
+            <el-radio-button value="auto">Otomatis (Ikuti Sistem)</el-radio-button>
+            <el-radio-button value="dark">Mode Gelap</el-radio-button>
+            <el-radio-button value="light">Mode Terang</el-radio-button>
+          </el-radio-group>
+        </div>
+        <p class="info-help">
+          Pilih skema warna antarmuka CloakDesk. Mode otomatis menyesuaikan dengan preferensi sistem operasi Anda.
+        </p>
+      </section>
+
       <section class="info-card sync-card">
         <div class="sync-card-head">
           <div class="info-label">Sinkronisasi Antar Perangkat</div>
