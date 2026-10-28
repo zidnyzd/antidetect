@@ -1,6 +1,7 @@
 """ixBrowser-compatible local API server (subset), stdlib only."""
 import base64
 import json
+import mimetypes
 import os
 import shutil
 import tempfile
@@ -28,6 +29,7 @@ from . import (
 from .paths import DATA_DIR
 
 ACTIONS = {}
+UI_DIST_DIR = Path(__file__).resolve().parent.parent / "ui" / "dist"
 
 
 class ApiError(Exception):
@@ -1888,18 +1890,84 @@ class Handler(BaseHTTPRequestHandler):
             _busy.release()
         self._json(200, {"error": {"code": 0, "message": "success"}, "data": data})
 
+    def _serve_static(self, head_only=False):
+        if not UI_DIST_DIR.is_dir():
+            return False
+
+        route = self._route()
+        rel = route.lstrip("/")
+        if not rel or rel == "index.html":
+            target = UI_DIST_DIR / "index.html"
+        else:
+            target = (UI_DIST_DIR / rel).resolve()
+            if not str(target).startswith(str(UI_DIST_DIR.resolve())) or not target.is_file():
+                if not Path(rel).suffix:
+                    target = UI_DIST_DIR / "index.html"
+                else:
+                    return False
+
+        if not target.is_file():
+            return False
+
+        mime, _ = mimetypes.guess_type(str(target))
+        if not mime:
+            mime = "application/octet-stream"
+        if mime.startswith("text/") or mime in ("application/javascript", "image/svg+xml"):
+            mime += "; charset=utf-8"
+
+        try:
+            content = target.read_bytes()
+        except OSError:
+            self._json(500, {"error": {"code": 500, "message": "Gagal membaca berkas UI"}})
+            return True
+
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(content)))
+        if target.suffix in (".js", ".css", ".svg", ".png", ".woff2"):
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(content)
+        return True
+
     def do_GET(self):
-        if self._route() in ("/", "/health"):
+        route = self._route()
+        if route == "/health":
             self._json(200, {"status": "ok", "open": len(launcher.opened_profiles())})
             return
-        if self._route().startswith("/api/v2/"):
+        if route.startswith("/api/v2/"):
             self._json(200, {"error": {"code": 1007, "message": "Gunakan metode POST."}})
             return
+
+        accept = self.headers.get("Accept", "")
+        if route == "/" and "application/json" in accept and "text/html" not in accept:
+            self._json(200, {"status": "ok", "open": len(launcher.opened_profiles())})
+            return
+
+        if self._serve_static(head_only=False):
+            return
+
+        if route == "/":
+            self._json(200, {"status": "ok", "open": len(launcher.opened_profiles())})
+            return
+
         self._json(404, {"error": {"code": 404, "message": "not found"}})
 
     def do_HEAD(self):
-        if self._route().startswith("/api/v2/"):
+        route = self._route()
+        if route.startswith("/api/v2/"):
             self._json(200, {"error": {"code": 1007, "message": "Gunakan metode POST."}})
+            return
+        if route == "/health":
+            self._json(200, {"status": "ok", "open": len(launcher.opened_profiles())})
+            return
+        if self._serve_static(head_only=True):
+            return
+        if route == "/":
+            self._json(200, {"status": "ok", "open": len(launcher.opened_profiles())})
             return
         self._json(404, {"error": {"code": 404, "message": "not found"}})
 
