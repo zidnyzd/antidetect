@@ -200,8 +200,20 @@ const seedText = computed(() => {
 })
 const builtinKernelPath = computed(() => {
   const list = kernels.value
-  const builtin = list.find((kernel) => kernel.builtin) || list.find((kernel) => kernel.active) || list[0]
+  const builtin = list.find((kernel) => kernel.builtin || kernel.is_builtin) || list[0]
   return builtin?.path || ''
+})
+const defaultKernelPath = computed(() => {
+  const list = kernels.value
+  const chosen =
+    list.find((kernel) => kernel.is_default || kernel.active) || list.find((kernel) => kernel.builtin) || list[0]
+  return chosen?.path || ''
+})
+const selectedKernel = computed(() => kernels.value.find((kernel) => kernel.path === kernelPath.value) || null)
+const selectedKernelUaHint = computed(() => {
+  const major = Number(selectedKernel.value?.major_version)
+  if (!major) return ''
+  return `User-Agent dan Sec-CH-UA diselaraskan otomatis ke Chrome/${major}.0.0.0 mengikuti kernel terpilih.`
 })
 
 function proxyTypeValue(raw) {
@@ -293,7 +305,9 @@ function numericPreference(value) {
 }
 
 function kernelLabel(kernel) {
-  return `${kernel.name} · ${kernel.version || 'versi tidak terbaca'}`
+  const ver = kernel.version || 'versi tidak terbaca'
+  const badge = kernel.is_default || kernel.active ? ' (Default)' : kernel.is_builtin || kernel.builtin ? ' (Bawaan)' : ''
+  return `${kernel.name || kernel.id}${badge} · ${ver}`
 }
 
 function syncKernelPath() {
@@ -301,7 +315,7 @@ function syncKernelPath() {
   const saved = kernelPath.value
   const available = kernels.value.some((kernel) => kernel.path === saved)
   kernelSavedMissing.value = !!saved && !available && saved !== builtinKernelPath.value
-  if (!available) kernelPath.value = builtinKernelPath.value
+  if (!available) kernelPath.value = isEdit.value ? builtinKernelPath.value : defaultKernelPath.value
 }
 
 function clearErrors() {
@@ -350,11 +364,18 @@ async function loadExtensions() {
 async function loadKernels() {
   kernelError.value = ''
   try {
-    const result = await api.engineInfo()
-    kernels.value = Array.isArray(result?.kernels) ? result.kernels : []
-  } catch (error) {
-    kernels.value = []
-    kernelError.value = error.message
+    const result = await api.kernelList()
+    const list = Array.isArray(result?.data) ? result.data : []
+    if (!list.length) throw new Error('kernel-list kosong')
+    kernels.value = list
+  } catch (kernelListError) {
+    try {
+      const result = await api.engineInfo()
+      kernels.value = Array.isArray(result?.kernels) ? result.kernels : []
+    } catch (error) {
+      kernels.value = []
+      kernelError.value = error.message || kernelListError.message
+    }
   }
   syncKernelPath()
 }
@@ -366,6 +387,8 @@ watch(
       resetForm()
       loadSavedProxies()
       loadExtensions()
+      kernelPath.value = ''
+      kernelSavedMissing.value = false
       loadKernels()
     }
   }
@@ -932,26 +955,26 @@ async function testProxy() {
         <el-form label-width="150px" label-position="right" class="dialog-form" @submit.prevent>
           <el-form-item label="Versi Kernel">
             <el-select
-              v-if="kernels.length > 1"
+              v-if="kernels.length >= 1"
               v-model="kernelPath"
               class="field-320"
               placeholder="Pilih kernel"
             >
               <el-option
                 v-for="kernel in kernels"
-                :key="kernel.id"
+                :key="kernel.id || kernel.path"
                 :label="kernelLabel(kernel)"
                 :value="kernel.path"
               />
             </el-select>
-            <div v-else-if="kernels.length === 1" class="kernel-inline">
-              <span class="kernel-inline-version mono">{{ kernels[0].version || 'Versi tidak terbaca' }}</span>
-              <span class="form-hint">Hanya satu kernel terpasang.</span>
-            </div>
             <span v-else class="form-hint">
-              {{ kernelError ? `engine-info gagal: ${kernelError}` : 'Memuat kernel...' }}
+              {{ kernelError ? `Daftar kernel gagal dimuat: ${kernelError}` : 'Memuat kernel...' }}
             </span>
           </el-form-item>
+          <p v-if="kernels.length === 1" class="form-hint">
+            Hanya satu kernel terpasang. Kernel tambahan dapat dipasang di Pengaturan, Kernel Browser.
+          </p>
+          <p v-if="selectedKernelUaHint" class="form-hint">{{ selectedKernelUaHint }}</p>
           <p v-if="kernelSavedMissing" class="form-hint is-warn">
             Kernel tersimpan tidak tersedia lagi, profil memakai engine bawaan.
           </p>

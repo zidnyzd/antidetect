@@ -1,6 +1,7 @@
 <script setup>
 import { computed, inject, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus } from '@element-plus/icons-vue'
 import { api, UI_VERSION } from '../api'
 import { useOnRefresh, useRefreshSignal } from '../refresh'
 
@@ -27,6 +28,13 @@ const profileTotal = ref(null)
 const profilesError = ref('')
 const engine = ref(null)
 const engineError = ref('')
+const kernels = ref([])
+const kernelData = ref(null)
+const kernelsError = ref('')
+const kernelBusyId = ref('')
+const installDialogVisible = ref(false)
+const installBusy = ref(false)
+const installErrors = reactive({ source_path: '' })
 const syncInfo = ref(null)
 const syncError = ref('')
 const conflicts = ref([])
@@ -44,7 +52,40 @@ const syncForm = reactive({
   passphrase: '',
 })
 
+const installForm = reactive({
+  source_type: 'local_archive',
+  source_path: '',
+  kernel_name: '',
+  set_default: false,
+})
+
 const apiBase = computed(() => `${window.location.origin}/api/v2/`)
+const kernelColumns = computed(() => [
+  { key: 'name', label: 'Nama', width: 180 },
+  { key: 'version', label: 'Versi', width: 190 },
+  { key: 'size', label: 'Ukuran', width: 90 },
+  { key: 'profiles', label: 'Profil', width: 90, align: 'right' },
+  { key: 'status', label: 'Status', width: 160 },
+  { key: 'actions', label: 'Aksi', width: 160, align: 'right' },
+])
+const enginePath = computed(() => pathDirname(kernelData.value?.engine_path || engine.value?.path || ''))
+const extraKernelDir = computed(() => '~/.local/share/antidetect/kernels')
+const maxKernelMajor = computed(() => {
+  const majors = kernels.value.map((item) => Number(item.major_version)).filter((value) => value > 0)
+  return majors.length ? Math.max(...majors) : null
+})
+const kernelSummary = computed(() => {
+  if (!kernels.value.length) return ''
+  return maxKernelMajor.value ? `Maks v${maxKernelMajor.value}` : ''
+})
+const installPlaceholder = computed(() =>
+  installForm.source_type === 'local_archive'
+    ? '/home/zdna/Downloads/ungoogled-chromium-152-linux.tar.xz'
+    : '/home/zdna/Downloads/ungoogled-chromium-152-linux'
+)
+const installSourceLabel = computed(() =>
+  installForm.source_type === 'local_archive' ? 'Path Arsip' : 'Path Folder'
+)
 const isSyncConfigured = computed(() => Boolean(syncInfo.value && syncInfo.value.configured))
 const conflictCount = computed(() => Number(syncInfo.value?.conflict_count || conflicts.value.length || 0))
 
@@ -76,6 +117,132 @@ async function loadEngine() {
   } catch (error) {
     engine.value = null
     engineError.value = error.message
+  }
+}
+
+async function loadKernels() {
+  try {
+    const result = await api.kernelList()
+    kernelData.value = result && typeof result === 'object' ? result : null
+    kernels.value = Array.isArray(result?.data) ? result.data : []
+    kernelsError.value = ''
+  } catch (error) {
+    kernelData.value = null
+    kernels.value = Array.isArray(engine.value?.kernels) ? engine.value.kernels : []
+    kernelsError.value = error.message
+  }
+}
+
+function pathDirname(value) {
+  const text = String(value || '')
+  const cut = text.lastIndexOf('/')
+  return cut > 0 ? text.slice(0, cut) : text
+}
+
+function kernelMajorLabel(kernel) {
+  const major = Number(kernel.major_version)
+  return major > 0 ? `v${major}` : ''
+}
+
+function isKernelDefault(kernel) {
+  return Boolean(kernel.is_default ?? kernel.active)
+}
+
+function kernelDeleteBlockReason(kernel) {
+  if (kernel.is_builtin) return 'Kernel bawaan tidak dapat dihapus'
+  const count = Number(kernel.profile_count || 0)
+  if (count > 0) return `Masih digunakan oleh ${count} profil aktif`
+  return ''
+}
+
+function openKernelInstallDialog() {
+  installForm.source_type = 'local_archive'
+  installForm.source_path = ''
+  installForm.kernel_name = ''
+  installForm.set_default = false
+  installErrors.source_path = ''
+  installDialogVisible.value = true
+}
+
+async function makeKernelDefault(kernel) {
+  kernelBusyId.value = kernel.id
+  try {
+    await api.kernelSetDefault(kernel.id)
+    ElMessage.success(`Kernel ${kernel.name || kernel.id} dijadikan default`)
+    await loadKernels()
+    refreshTick.value += 1
+  } catch (error) {
+    ElMessage.error(`Gagal mengubah kernel default: ${error.message}`)
+  } finally {
+    kernelBusyId.value = ''
+  }
+}
+
+async function deleteKernel(kernel) {
+  const reason = kernelDeleteBlockReason(kernel)
+  if (reason) {
+    ElMessage.warning(reason)
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `Hapus kernel ${kernel.name || kernel.id} beserta seluruh berkasnya dari disk? Tindakan ini tidak dapat dibatalkan.`,
+      'Hapus Kernel',
+      {
+        confirmButtonText: 'Hapus',
+        cancelButtonText: 'Batal',
+        type: 'warning',
+        confirmButtonClass: 'danger-action',
+      }
+    )
+  } catch {
+    return
+  }
+  kernelBusyId.value = kernel.id
+  try {
+    await api.kernelDelete(kernel.id)
+    ElMessage.success(`Kernel ${kernel.name || kernel.id} dihapus`)
+    await loadKernels()
+    refreshTick.value += 1
+  } catch (error) {
+    if (error.code === 1105) {
+      ElMessage.error(`Kernel masih dipakai profil aktif. Ganti kernel profil tersebut dulu. ${error.message}`)
+    } else {
+      ElMessage.error(`Gagal menghapus kernel: ${error.message}`)
+    }
+  } finally {
+    kernelBusyId.value = ''
+  }
+}
+
+async function submitKernelInstall() {
+  const sourcePath = installForm.source_path.trim()
+  installErrors.source_path = ''
+  if (!sourcePath) {
+    installErrors.source_path = installSourceLabel.value + ' wajib diisi'
+    return
+  }
+  if (!sourcePath.startsWith('/')) {
+    installErrors.source_path = 'Gunakan path absolut, diawali tanda /'
+    return
+  }
+  installBusy.value = true
+  try {
+    const installed = await api.kernelInstall({
+      source_type: installForm.source_type,
+      source_path: sourcePath,
+      kernel_name: installForm.kernel_name.trim() || undefined,
+      set_default: Boolean(installForm.set_default),
+    })
+    const label = installed?.name || installed?.id || 'Kernel baru'
+    ElMessage.success(`${label} berhasil dipasang`)
+    installDialogVisible.value = false
+    await Promise.all([loadKernels(), loadEngine()])
+    refreshTick.value += 1
+  } catch (error) {
+    ElMessage.error(`Instalasi kernel gagal: ${error.message}`)
+  } finally {
+    installBusy.value = false
   }
 }
 
@@ -255,6 +422,7 @@ function handleExternalThemeChange(event) {
 async function load() {
   loading.value = true
   await Promise.all([loadHealth(), loadProfileTotal(), loadEngine(), loadSync()])
+  await loadKernels()
   loading.value = false
 }
 
@@ -475,26 +643,100 @@ useOnRefresh(() => load())
       </section>
 
       <section class="info-card engine-card">
-        <div class="info-label">Engine</div>
-        <div class="info-value mono">{{ engine ? engine.path : 'Tidak tersedia' }}</div>
-        <p class="info-help">
-          <template v-if="engine">
-            {{ engine.version || 'Versi tidak terbaca' }} · {{ engine.kernels.length }} kernel terpasang
-          </template>
-          <template v-else-if="engineError">engine-info gagal: {{ engineError }}</template>
-          <template v-else>Menunggu engine-info.</template>
+        <div class="kernel-head">
+          <div class="kernel-head-main">
+            <div class="info-label">Kernel Browser</div>
+            <p class="kernel-paths">
+              <span class="mono">{{ enginePath || '-' }}</span>
+              <span class="kernel-paths-sep">tambahan:</span>
+              <span class="mono">{{ extraKernelDir }}</span>
+            </p>
+          </div>
+          <div class="kernel-head-actions">
+            <span v-if="kernelSummary" class="kernel-summary">{{ kernelSummary }}</span>
+            <el-button type="primary" size="small" :icon="Plus" @click="openKernelInstallDialog">
+              Pasang Kernel Baru
+            </el-button>
+          </div>
+        </div>
+
+        <el-table
+          :data="kernels"
+          size="small"
+          class="kernel-table"
+          :empty-text="kernelsError ? 'Daftar kernel tidak tersedia' : 'Belum ada kernel terpasang'"
+        >
+          <el-table-column
+            v-for="column in kernelColumns"
+            :key="column.key"
+            :label="column.label"
+            :width="column.width"
+            :align="column.align"
+          >
+            <template #default="{ row }">
+              <template v-if="column.key === 'name'">
+                <div class="kernel-cell-name">{{ row.name || row.id }}</div>
+                <div v-if="row.id && row.id !== row.name" class="kernel-cell-id mono">{{ row.id }}</div>
+              </template>
+              <template v-else-if="column.key === 'version'">
+                <span class="kernel-cell-version mono">{{ row.version || 'Tidak terbaca' }}</span>
+                <span v-if="kernelMajorLabel(row)" class="kernel-major">{{ kernelMajorLabel(row) }}</span>
+              </template>
+              <template v-else-if="column.key === 'size'">
+                {{ row.disk_size_mb || 0 }} MB
+              </template>
+              <template v-else-if="column.key === 'profiles'">
+                {{ row.profile_count || 0 }} profil
+              </template>
+              <template v-else-if="column.key === 'status'">
+                <span class="kernel-status">
+                  <span v-if="row.is_builtin" class="kernel-badge is-builtin">Bawaan</span>
+                  <span v-if="isKernelDefault(row)" class="kernel-badge is-default">Default</span>
+                </span>
+              </template>
+              <template v-else-if="column.key === 'actions'">
+                <div class="kernel-actions">
+                  <el-button
+                    size="small"
+                    :disabled="isKernelDefault(row)"
+                    :loading="kernelBusyId === row.id"
+                    @click="makeKernelDefault(row)"
+                  >
+                    Jadikan Default
+                  </el-button>
+                  <el-tooltip
+                    :content="kernelDeleteBlockReason(row)"
+                    :disabled="!kernelDeleteBlockReason(row)"
+                    placement="top"
+                  >
+                    <span class="kernel-delete-wrap">
+                      <el-button
+                        size="small"
+                        type="danger"
+                        plain
+                        :disabled="Boolean(kernelDeleteBlockReason(row))"
+                        :loading="kernelBusyId === row.id"
+                        @click="deleteKernel(row)"
+                      >
+                        Hapus
+                      </el-button>
+                    </span>
+                  </el-tooltip>
+                </div>
+              </template>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <p v-if="kernelsError" class="info-help is-error">
+          kernel-list gagal: {{ kernelsError }}. Menampilkan data dari engine-info.
         </p>
-        <ul v-if="engine" class="kernel-list">
-          <li v-for="kernel in engine.kernels" :key="kernel.id || kernel.path" class="kernel-item">
-            <div class="kernel-line">
-              <span class="kernel-name">{{ kernel.name || kernel.id }}</span>
-              <span class="kernel-version">{{ kernel.version || 'Versi tidak terbaca' }}</span>
-              <span v-if="kernel.active" class="kernel-badge">Aktif</span>
-            </div>
-            <span class="kernel-path mono">{{ kernel.path }}</span>
-          </li>
-        </ul>
-        <p v-if="engine && engine.kernels.length === 1" class="info-help">Hanya satu kernel terpasang.</p>
+        <p v-else-if="engineError && !kernels.length" class="info-help is-error">
+          engine-info gagal: {{ engineError }}
+        </p>
+        <p v-else class="info-help">
+          Kernel default otomatis dipakai untuk profil baru. Kernel yang masih dipakai profil aktif tidak bisa dihapus.
+        </p>
       </section>
 
       <section class="info-card">
@@ -512,5 +754,55 @@ useOnRefresh(() => load())
         <p class="info-help">Versi antarmuka di folder ui/.</p>
       </section>
     </div>
+
+    <el-dialog
+      v-model="installDialogVisible"
+      title="Pasang Kernel Baru"
+      width="520px"
+      :close-on-click-modal="!installBusy"
+      :close-on-press-escape="!installBusy"
+      :show-close="!installBusy"
+    >
+      <el-form label-position="top" class="kernel-install-form" @submit.prevent="submitKernelInstall">
+        <el-form-item label="Sumber Kernel">
+          <el-radio-group v-model="installForm.source_type" :disabled="installBusy">
+            <el-radio value="local_archive">Arsip Lokal (.tar.xz, .tar.gz, .zip)</el-radio>
+            <el-radio value="local_dir">Folder Direktori Lokal</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item :label="installSourceLabel" :error="installErrors.source_path" required>
+          <el-input
+            v-model="installForm.source_path"
+            class="mono"
+            :placeholder="installPlaceholder"
+            :disabled="installBusy"
+            spellcheck="false"
+          />
+        </el-form-item>
+        <el-form-item label="Nama Kernel">
+          <el-input
+            v-model="installForm.kernel_name"
+            maxlength="60"
+            placeholder="Opsional, cth: Chromium 152"
+            :disabled="installBusy"
+          />
+        </el-form-item>
+        <el-checkbox v-model="installForm.set_default" :disabled="installBusy" class="kernel-install-default">
+          Jadikan kernel default untuk pembuatan profil baru
+        </el-checkbox>
+        <p class="info-help">
+          Biner chrome dibaca versinya dan divalidasi sebagai ELF x86_64 sebelum dipasang. Proses ini butuh beberapa detik
+          untuk arsip berukuran ratusan megabita.
+        </p>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button :disabled="installBusy" @click="installDialogVisible = false">Batal</el-button>
+          <el-button type="primary" :loading="installBusy" @click="submitKernelInstall">
+            {{ installBusy ? 'Memvalidasi & mengekstrak biner...' : 'Pasang' }}
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
