@@ -98,7 +98,10 @@ def save_credentials(creds, conn=None, db_path=None):
 
 def _post_json(url, payload, token=None, timeout=15):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "CloakDesk/0.2.0 (Linux; x86_64)",
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
