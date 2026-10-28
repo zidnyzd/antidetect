@@ -8,7 +8,9 @@ PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
 
 # 1. Pastikan backend CloakDesk aktif di port 53200
 if ! curl -s -m 1 http://127.0.0.1:53200/health >/dev/null 2>&1; then
-    nohup "$PYTHON_BIN" -m antidetect serve >/dev/null 2>&1 &
+    PY="/usr/bin/python3"
+    [ -x "$PYTHON_BIN" ] && PY="$PYTHON_BIN"
+    nohup "$PY" -m antidetect serve >/dev/null 2>&1 &
     for _ in $(seq 1 30); do
         if curl -s -m 1 http://127.0.0.1:53200/health >/dev/null 2>&1; then
             break
@@ -17,33 +19,14 @@ if ! curl -s -m 1 http://127.0.0.1:53200/health >/dev/null 2>&1; then
     done
 fi
 
-# 2. Cari runtime browser untuk jendela aplikasi mandiri (app mode)
-APP_BROWSER=""
-if [ -x "/opt/brave.com/brave-origin/brave" ]; then
-    APP_BROWSER="/opt/brave.com/brave-origin/brave"
-elif command -v brave-browser >/dev/null 2>&1; then
-    APP_BROWSER="$(command -v brave-browser)"
-elif command -v google-chrome >/dev/null 2>&1; then
-    APP_BROWSER="$(command -v google-chrome)"
-elif command -v chromium-browser >/dev/null 2>&1; then
-    APP_BROWSER="$(command -v chromium-browser)"
-elif command -v chromium >/dev/null 2>&1; then
-    APP_BROWSER="$(command -v chromium)"
+# 2. Prioritaskan runtime Electron mandiri (100% standalone native seperti ixBrowser)
+ELECTRON_BIN="$PROJECT_DIR/ui/node_modules/.bin/electron"
+MAIN_CJS="$PROJECT_DIR/ui/electron-main.cjs"
+
+if [ -x "$ELECTRON_BIN" ] && [ -f "$MAIN_CJS" ]; then
+    exec "$ELECTRON_BIN" "$MAIN_CJS" "$@"
 fi
 
+# Fallback ke browser jika Electron belum terpasang
 URL="http://127.0.0.1:53200/#/profiles"
-USER_DATA="$HOME/.config/cloakdesk/app-shell"
-mkdir -p "$USER_DATA"
-
-if [ -n "$APP_BROWSER" ]; then
-    exec "$APP_BROWSER" \
-        --app="$URL" \
-        --class="CloakDesk" \
-        --name="CloakDesk" \
-        --user-data-dir="$USER_DATA" \
-        --window-size=1280,820 \
-        "$@"
-else
-    # Fallback ke browser default sistem
-    exec xdg-open "$URL"
-fi
+exec xdg-open "$URL"
