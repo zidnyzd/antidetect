@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote
 
-from . import extensions, store, sync_agent
+from . import extensions, kernels, store, sync_agent
 from .paths import DATA_DIR
 
 ENGINE_DIR = Path(
@@ -158,48 +158,100 @@ def kernel_version(binary):
         return _kernel_versions[key]
 
 
+def _resolved_path(path):
+    try:
+        return str(Path(path).resolve())
+    except (OSError, ValueError):
+        return str(path)
+
+
+def reset_kernel_cache(binary=None):
+    """Buang cache versi dan flag satu biner, atau seluruh kernel."""
+    with _kernel_versions_lock:
+        if binary is None:
+            _kernel_versions.clear()
+            _flag_cache.clear()
+            kernels.invalidate_size_cache()
+            return
+        key = str(binary)
+        _kernel_versions.pop(key, None)
+        for flag_key in [item for item in _flag_cache if item[0] == key]:
+            _flag_cache.pop(flag_key, None)
+    kernels.invalidate_size_cache(Path(binary).parent)
+
+
 def available_kernels():
     """Builtin engine plus each executable KERNELS_DIR/<name>/chrome."""
-    kernels = [
-        {
-            "id": BUILTIN_KERNEL_ID,
-            "name": "Engine Bawaan",
-            "version": kernel_version(CHROME),
-            "path": str(CHROME),
-            "active": True,
-            "builtin": True,
-        }
-    ]
+    default_id = kernels.get_default_kernel_id()
     try:
         entries = sorted(KERNELS_DIR.iterdir()) if KERNELS_DIR.is_dir() else []
     except OSError:
         entries = []
+    extra = []
     for entry in entries:
         binary = entry / "chrome"
-        if entry.name == BUILTIN_KERNEL_ID or not _executable(binary) or not _inside_kernels(binary):
+        if (
+            entry.name.startswith(".")
+            or entry.name == BUILTIN_KERNEL_ID
+            or not _executable(binary)
+            or not _inside_kernels(binary)
+        ):
             continue
-        kernels.append(
+        metadata = kernels.read_metadata(entry) or {}
+        version = kernel_version(binary)
+        is_default = entry.name == default_id
+        extra.append(
             {
                 "id": entry.name,
-                "name": entry.name,
-                "version": kernel_version(binary),
+                "name": str(metadata.get("name") or entry.name),
+                "version": version,
+                "major_version": kernels.parse_major_version(version),
                 "path": str(binary),
-                "active": False,
+                "active": is_default,
                 "builtin": False,
+                "is_builtin": False,
+                "is_default": is_default,
+                "disk_size_mb": kernels.cached_dir_size_mb(entry),
+                "created_at": kernels.folder_created_at(entry),
+                "profile_count": 0,
             }
         )
-    return kernels
+    counts = kernels.profile_counts(CHROME, [Path(item["path"]) for item in extra])
+    builtin_version = kernel_version(CHROME)
+    builtin_default = default_id == BUILTIN_KERNEL_ID
+    builtin = {
+        "id": BUILTIN_KERNEL_ID,
+        "name": "Engine Bawaan",
+        "version": builtin_version,
+        "major_version": kernels.parse_major_version(builtin_version),
+        "path": str(CHROME),
+        "active": builtin_default,
+        "builtin": True,
+        "is_builtin": True,
+        "is_default": builtin_default,
+        "disk_size_mb": kernels.cached_dir_size_mb(ENGINE_DIR),
+        "created_at": kernels.folder_created_at(ENGINE_DIR),
+        "profile_count": counts.get(_resolved_path(CHROME), 0),
+    }
+    for item in extra:
+        item["profile_count"] = counts.get(_resolved_path(item["path"]), 0)
+    return [builtin] + extra
 
 
 def kernel_for(profile):
-    """Profile kernel inside KERNELS_DIR, else the builtin engine."""
+    """Profile kernel inside KERNELS_DIR, default kernel, else builtin."""
     raw = str((profile.get("preference_config") or {}).get("kernel_path") or "").strip()
-    if not raw:
+    if raw:
+        candidate = Path(raw)
+        if _inside_kernels(candidate) and _executable(candidate):
+            return candidate.resolve()
         return CHROME
-    candidate = Path(raw)
-    if not _inside_kernels(candidate) or not _executable(candidate):
-        return CHROME
-    return candidate.resolve()
+    default_id = kernels.get_default_kernel_id()
+    if default_id != BUILTIN_KERNEL_ID:
+        candidate = KERNELS_DIR / default_id / "chrome"
+        if _inside_kernels(candidate) and _executable(candidate):
+            return candidate.resolve()
+    return CHROME
 
 
 class LaunchError(Exception):

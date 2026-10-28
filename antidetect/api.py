@@ -17,6 +17,7 @@ from . import (
     csvimport,
     extensions,
     iximport,
+    kernels,
     launcher,
     passwords,
     profileio,
@@ -91,19 +92,120 @@ def _event_name(name, limit=80):
 
 @action("engine-info")
 def engine_info(params):
-    kernels = [
+    kernel_rows = [
         {**kernel, "supports": launcher.kernel_support(kernel["path"])}
         for kernel in launcher.available_kernels()
     ]
     return {
         "path": str(launcher.ENGINE_DIR),
-        "version": kernels[0]["version"],
-        "kernels": kernels,
+        "version": kernel_rows[0]["version"],
+        "kernels": kernel_rows,
         "disable_spoofing_values": list(launcher.DISABLE_SPOOFING_VALUES),
         "disable_spoofing_effective": list(launcher.DISABLE_SPOOFING_EFFECTIVE),
         "webrtc_modes": list(launcher.WEBRTC_MODES),
         "max_kernel_version": launcher.max_kernel_version(),
+        "default_kernel_id": kernels.get_default_kernel_id(),
     }
+
+
+def _kernel_path_for(kernel_id):
+    if kernel_id == kernels.BUILTIN_KERNEL_ID:
+        return str(launcher.CHROME)
+    return str(launcher.KERNELS_DIR / kernel_id / "chrome")
+
+
+def _kernel_row(kernel_id):
+    for row in launcher.available_kernels():
+        if row["id"] == kernel_id:
+            return {**row, "supports": launcher.kernel_support(row["path"])}
+    raise ApiError(1103, "Kernel tidak ditemukan")
+
+
+@action("kernel-list")
+def kernel_list(params):
+    rows = launcher.available_kernels()
+    data = [{**row, "supports": launcher.kernel_support(row["path"])} for row in rows]
+    return {
+        "total": len(data),
+        "default_kernel_id": kernels.get_default_kernel_id(),
+        "data": data,
+    }
+
+
+@action("kernel-install")
+def kernel_install(params):
+    source_type = str(params.get("source_type") or "local_archive").strip()
+    kernel_name = params.get("kernel_name")
+    if source_type == "local_archive":
+        source = params.get("archive_path") or params.get("source_path")
+    elif source_type == "local_dir":
+        source = params.get("source_path") or params.get("archive_path")
+    else:
+        raise ApiError(1000, "source_type harus local_archive atau local_dir")
+    if not str(source or "").strip():
+        field = "archive_path" if source_type == "local_archive" else "source_path"
+        raise ApiError(1000, f"{field} wajib diisi")
+    try:
+        if source_type == "local_archive":
+            installed = kernels.install_kernel_from_archive(source, kernel_name)
+        else:
+            installed = kernels.install_kernel_from_dir(source, kernel_name)
+    except kernels.KernelError as error:
+        raise ApiError(error.code, str(error))
+    launcher.reset_kernel_cache(Path(installed["path"]))
+    if params.get("set_default"):
+        try:
+            kernels.set_default_kernel_id(installed["id"])
+        except kernels.KernelError as error:
+            raise ApiError(error.code, str(error))
+    _event("kernel-install", f'Kernel "{_event_name(installed["name"])}" dipasang')
+    return _kernel_row(installed["id"])
+
+
+@action("kernel-delete")
+def kernel_delete(params):
+    kernel_id = str(params.get("kernel_id") or "").strip()
+    if not kernel_id:
+        raise ApiError(1000, "kernel_id wajib diisi")
+    binary = _kernel_path_for(kernel_id)
+    try:
+        result = kernels.delete_kernel(kernel_id)
+    except kernels.KernelError as error:
+        raise ApiError(error.code, str(error))
+    launcher.reset_kernel_cache(Path(binary))
+    _event("kernel-delete", f'Kernel "{_event_name(kernel_id)}" dihapus')
+    return result
+
+
+@action("kernel-set-default")
+def kernel_set_default(params):
+    kernel_id = str(params.get("kernel_id") or "").strip()
+    if not kernel_id:
+        raise ApiError(1000, "kernel_id wajib diisi")
+    try:
+        kernels.set_default_kernel_id(kernel_id)
+    except kernels.KernelError as error:
+        raise ApiError(error.code, str(error))
+    _event("kernel-set-default", f'Kernel default diubah ke "{_event_name(kernel_id)}"')
+    return {"default_kernel_id": kernel_id, "path": _kernel_path_for(kernel_id)}
+
+
+def _apply_default_kernel(data):
+    """Isi kernel_path dari kernel default saat klien tidak memilih kernel."""
+    preferences = data.get("preference_config")
+    if not isinstance(preferences, dict):
+        preferences = {}
+    if str(preferences.get("kernel_path") or "").strip():
+        return
+    default_id = kernels.get_default_kernel_id()
+    if default_id == kernels.BUILTIN_KERNEL_ID:
+        return
+    binary = launcher.KERNELS_DIR / default_id / "chrome"
+    if not binary.is_file():
+        return
+    preferences = dict(preferences)
+    preferences["kernel_path"] = str(binary)
+    data["preference_config"] = preferences
 
 
 def _check_kernel_path(data):
@@ -417,6 +519,7 @@ def profile_logs(params):
 def profile_create(params):
     _validate_cookie_payload(params.get("cookie"))
     payload = _prepare_profile(params)
+    _apply_default_kernel(payload)
     _check_kernel_path(payload)
     _check_preferences(payload)
     _check_fingerprint(payload)
