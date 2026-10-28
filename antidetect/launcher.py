@@ -158,6 +158,148 @@ def kernel_version(binary):
         return _kernel_versions[key]
 
 
+def kernel_major_version(binary):
+    """Nomor versi mayor biner kernel, 0 bila versi tidak terbaca."""
+    return kernels.parse_major_version(kernel_version(binary))
+
+
+UA_CHROME_PATTERN = re.compile(r"Chrome/\d+\.\d+\.\d+\.\d+")
+UA_CHROMIUM_PATTERN = re.compile(r"Chromium/\d+\.\d+\.\d+\.\d+")
+
+
+def _ua_platform_override(ua, platform, system_version):
+    """Samakan token OS di User-Agent dengan platform fingerprint.
+
+    Mengembalikan None bila token OS tidak bisa dibentuk dari masukan.
+    """
+    if not platform:
+        return ua
+    value = str(platform).strip().lower()
+    if value in ("windows", "win"):
+        return re.sub(r"\([^)]*\)", "(Windows NT 10.0; Win64; x64)", ua, count=1)
+    if value in ("macos", "mac", "mac os"):
+        version = str(system_version or "").strip().replace(".", "_")
+        token = f"Macintosh; Intel Mac OS X {version}" if version else "Macintosh; Intel Mac OS X 10_15_7"
+        return re.sub(r"\([^)]*\)", f"({token})", ua, count=1)
+    return None
+
+
+def align_user_agent(ua, major_version, platform=None, system_version=None):
+    """Selaraskan versi Chrome di User-Agent ke versi mayor kernel aktif.
+
+    User-Agent direduksi Chromium memakai format Chrome/<major>.0.0.0, jadi
+    token versi lama dari profil impor diganti ke bentuk tersebut. String yang
+    tidak memuat token Chrome dibiarkan apa adanya.
+    """
+    if ua in (None, ""):
+        return ua
+    text = str(ua).strip()
+    if not text:
+        return text
+    try:
+        major = int(major_version)
+    except (TypeError, ValueError):
+        return text
+    if major <= 0:
+        return text
+    aligned = _ua_platform_override(text, platform, system_version)
+    if aligned is None:
+        return text
+    for pattern in (UA_CHROME_PATTERN, UA_CHROMIUM_PATTERN):
+        if pattern.search(aligned):
+            aligned = pattern.sub(f"Chrome/{major}.0.0.0", aligned)
+    return aligned
+
+
+def _kernel_id_for(preferences):
+    """ID kernel dari jalur KERNELS_DIR/<id>/chrome, atau builtin."""
+    if not isinstance(preferences, dict):
+        return BUILTIN_KERNEL_ID
+    raw = str(preferences.get("kernel_path") or "").strip()
+    if not raw:
+        return BUILTIN_KERNEL_ID
+    try:
+        if Path(raw).resolve().parent.parent == KERNELS_DIR.resolve():
+            return Path(raw).resolve().parent.name
+    except OSError:
+        return BUILTIN_KERNEL_ID
+    return BUILTIN_KERNEL_ID
+
+
+def kernel_reference(preferences, binary=None):
+    """Atribut portabel kernel untuk preference_config.
+
+    kernel_path tetap jalur lokal mesin ini, kernel_id dan kernel_version
+    dipakai perangkat lain untuk mencari padanannya di KERNELS_DIR lokalnya.
+    """
+    preferences = preferences if isinstance(preferences, dict) else {}
+    raw = str(preferences.get("kernel_path") or "").strip()
+    if binary is None:
+        binary = Path(raw) if raw else kernel_for({"preference_config": preferences})
+    binary = Path(binary)
+    kernel_id = _kernel_id_for(preferences)
+    if kernel_id == BUILTIN_KERNEL_ID:
+        for kernel in available_kernels():
+            if Path(kernel["path"]) == binary:
+                kernel_id = str(kernel["id"])
+                break
+    return {
+        "kernel_id": kernel_id,
+        "kernel_version": str(kernel_major_version(binary)),
+        "kernel_path": str(binary),
+    }
+
+
+def resolve_synced_kernel_preference(pref_config):
+    """Petakan preference_config dari perangkat lain ke kernel lokal.
+
+    Urutan: kernel_id yang cocok, kernel lokal dengan versi mayor sama, lalu
+    biarkan kernel_path asal (kernel_for akan fallback ke engine bawaan).
+    kernel_id dan kernel_version asal tidak diubah supaya tetap jadi metadata.
+    """
+    preferences = dict(pref_config) if isinstance(pref_config, dict) else {}
+    wanted_id = str(preferences.get("kernel_id") or "").strip()
+    wanted_version = str(preferences.get("kernel_version") or "").strip()
+    if not wanted_id and not wanted_version:
+        return preferences
+
+    # kernel_path dari perangkat lain pasti tidak berada di KERNELS_DIR mesin
+    # ini, sehingga pemeriksaan di bawah sekaligus menguji jalur lokal.
+    current = str(preferences.get("kernel_path") or "").strip()
+    if current and _inside_kernels(Path(current)) and _executable(Path(current)):
+        if not wanted_id or wanted_id == _kernel_id_for(preferences):
+            return preferences
+
+    # kernel_id datang dari perangkat lain, jadi hanya id yang aman dipakai
+    safe_id = (
+        bool(wanted_id)
+        and not wanted_id.startswith(".")
+        and "/" not in wanted_id
+        and "\\" not in wanted_id
+    )
+    if safe_id and _kernel_id_for({"kernel_path": str(KERNELS_DIR / wanted_id / "chrome")}) == wanted_id:
+        candidate = KERNELS_DIR / wanted_id / "chrome"
+        if _inside_kernels(candidate) and _executable(candidate):
+            preferences["kernel_path"] = str(candidate.resolve())
+            return preferences
+    if wanted_id == BUILTIN_KERNEL_ID:
+        preferences["kernel_path"] = str(CHROME)
+        return preferences
+
+    try:
+        wanted_major = int(str(wanted_version).split(".", 1)[0])
+    except (TypeError, ValueError):
+        wanted_major = 0
+    if wanted_major > 0:
+        for kernel in available_kernels():
+            if kernel.get("builtin"):
+                continue
+            if int(kernel.get("major_version") or 0) == wanted_major:
+                preferences["kernel_path"] = str(kernel["path"])
+                return preferences
+    return preferences
+
+
 def _resolved_path(path):
     try:
         return str(Path(path).resolve())
@@ -800,8 +942,21 @@ def build_args(profile, port, app_args=None, proxy_arg=None, data_dir=None):
         args.append(f"--fingerprint-hardware-concurrency={int(fp['hardware_concurrency'])}")
     if fp.get("device_memory"):
         args.append(f"--fingerprint-memory={fp['device_memory']}")
-    if fp.get("br_version"):
-        args.append(f"--fingerprint-brand-version={fp['br_version']}")
+    # Identitas versi selalu ikut biner yang benar-benar dijalankan, termasuk
+    # saat profil hasil sync jatuh ke kernel bawaan mesin ini.
+    major = kernel_major_version(binary)
+    brand_version = str(fp.get("br_version") or "").strip()
+    if not brand_version or major <= 0 or kernels.parse_major_version(brand_version) != major:
+        brand_version = f"{major}.0.0.0" if major > 0 else brand_version
+    if brand_version:
+        args.append(f"--fingerprint-brand-version={brand_version}")
+    platform_value = fp.get("platform")
+    if fp.get("ua"):
+        aligned_ua = align_user_agent(
+            fp.get("ua"), major, platform_value, fp.get("system_version")
+        )
+        if aligned_ua:
+            args.append(f"--user-agent={aligned_ua}")
     if fp.get("language"):
         args.append(f"--lang={fp['language']}")
         args.append(f"--accept-lang={fp['language']}")

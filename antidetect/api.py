@@ -196,16 +196,65 @@ def _apply_default_kernel(data):
     if not isinstance(preferences, dict):
         preferences = {}
     if str(preferences.get("kernel_path") or "").strip():
+        # Tetap segarkan kernel_id dan kernel_version agar payload sync tidak
+        # membawa label basi bila klien hanya mengirim jalur kernel.
+        if data.get("preference_config") is preferences:
+            preferences = dict(preferences)
+            preferences.update(launcher.kernel_reference(preferences))
+            data["preference_config"] = preferences
         return
     default_id = kernels.get_default_kernel_id()
-    if default_id == kernels.BUILTIN_KERNEL_ID:
-        return
-    binary = launcher.KERNELS_DIR / default_id / "chrome"
-    if not binary.is_file():
-        return
-    preferences = dict(preferences)
-    preferences["kernel_path"] = str(binary)
+    if default_id != kernels.BUILTIN_KERNEL_ID:
+        binary = launcher.KERNELS_DIR / default_id / "chrome"
+        if not binary.is_file():
+            return
+        preferences = dict(preferences)
+        preferences["kernel_path"] = str(binary)
+    else:
+        # Profil baru selalu membawa referensi eksplisit supaya perangkat lain
+        # tidak menebak kernel dari preferensi default mesin asal.
+        preferences = dict(preferences)
+        preferences["kernel_path"] = str(launcher.CHROME)
     data["preference_config"] = preferences
+
+
+def _align_kernel_metadata(data, stored=None):
+    """Simpan referensi kernel portabel dan selaraskan identitas versi.
+
+    preference_config menampung kernel_id, kernel_version, dan kernel_path
+    lokal mesin ini. fingerprint_config.br_version serta ua ikut versi mayor
+    biner yang sama supaya metadata profil tidak bertentangan dengan engine.
+    """
+    stored = stored if isinstance(stored, dict) else {}
+    preferences = data.get("preference_config")
+    incoming_preferences = isinstance(preferences, dict)
+    if not incoming_preferences:
+        preferences = stored.get("preference_config")
+        if not isinstance(preferences, dict):
+            return data
+    preferences = dict(preferences)
+    binary = launcher.kernel_for({"preference_config": preferences})
+    if incoming_preferences:
+        data["preference_config"] = launcher.kernel_reference(preferences, binary)
+
+    major = launcher.kernel_major_version(binary)
+    if major <= 0:
+        return data
+    fingerprint = data.get("fingerprint_config")
+    if not isinstance(fingerprint, dict):
+        # Klien hanya mengubah preferensi: pakai fingerprint tersimpan agar
+        # br_version dan ua tidak ketinggalan versi kernel baru.
+        fingerprint = stored.get("fingerprint_config")
+        if not isinstance(fingerprint, dict):
+            return data
+    fingerprint = dict(fingerprint)
+    fingerprint["br_version"] = f"{major}.0.0.0"
+    if fingerprint.get("ua"):
+        fingerprint["ua"] = launcher.align_user_agent(
+            fingerprint.get("ua"), major, fingerprint.get("platform"), fingerprint.get("system_version")
+        )
+    data["fingerprint_config"] = fingerprint
+    return data
 
 
 def _check_kernel_path(data):
@@ -524,6 +573,7 @@ def profile_create(params):
     _check_preferences(payload)
     _check_fingerprint(payload)
     payload = _normalize_profile_payload(payload)
+    _align_kernel_metadata(payload)
     with store.db() as conn:
         pid = store.create_profile(conn, payload)
         name = _profile_name(conn, pid)
@@ -544,6 +594,7 @@ def profile_update(params):
     _check_preferences(payload)
     _check_fingerprint(payload)
     payload = _normalize_profile_payload(payload)
+    _align_kernel_metadata(payload, stored)
     with store.db() as conn:
         store.update_profile(conn, pid, payload)
         name = conn.execute("SELECT name FROM profiles WHERE id = ?", (pid,)).fetchone()["name"]

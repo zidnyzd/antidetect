@@ -810,6 +810,16 @@ def _profile_sync_payload(conn, row):
     proxy_fp = sync_crypto.proxy_fingerprint(raw_proxy, dedupe_key) if dedupe_key else None
     enc_proxy = sync_crypto.encrypt_proxy_config(raw_proxy, kek) if kek else dict(raw_proxy)
 
+    # Referensi kernel portabel: path absolut hanya berguna di mesin asal,
+    # kernel_id dan kernel_version dipakai perangkat lain untuk memetakan ulang.
+    synced_pref = _loads(_row_val(row, "preference_config"))
+    if not isinstance(synced_pref, dict):
+        synced_pref = {}
+    if str(synced_pref.get("kernel_path") or "").strip():
+        synced_pref.update(launcher.kernel_reference(synced_pref))
+    else:
+        synced_pref.setdefault("kernel_id", launcher.BUILTIN_KERNEL_ID)
+
     return {
         "uuid": _row_val(row, "uuid"),
         "name": _row_val(row, "name") or "Profile",
@@ -822,7 +832,7 @@ def _profile_sync_payload(conn, row):
         "proxy_config": enc_proxy,
         "proxy_fingerprint": proxy_fp,
         "fingerprint_config": _loads(_row_val(row, "fingerprint_config")),
-        "preference_config": _loads(_row_val(row, "preference_config")),
+        "preference_config": synced_pref,
         "tag_uuids": tag_uuids,
         "tag_titles": tag_titles,
         "seed": int(_row_val(row, "seed") or 1),
@@ -1890,6 +1900,10 @@ def apply_remote_change(conn, change):
         pref_config = payload.get("preference_config") or {}
         if isinstance(pref_config, str):
             pref_config = _loads(pref_config)
+        # kernel_path dari perangkat asal dipetakan ke kernel lokal; fallback
+        # ke kernel bawaan saat padanan tidak ada, tanpa mengubah kernel_id
+        # dan kernel_version asal (tetap tersimpan sebagai metadata).
+        pref_config = launcher.resolve_synced_kernel_preference(pref_config)
 
         deleted_at = payload.get("deleted_at")
         if operation == "soft_delete" and not deleted_at:
