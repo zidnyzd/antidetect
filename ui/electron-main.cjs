@@ -2,13 +2,33 @@ const { app, BrowserWindow } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 const http = require('http')
+const fs = require('fs')
 
-const projectRoot = path.resolve(__dirname, '..')
+// Tentukan direktori root CloakDesk yang valid
+let projectRoot = path.resolve(__dirname, '..')
+if (!fs.existsSync(path.join(projectRoot, 'antidetect')) && fs.existsSync('/home/zdna/Projects/cloakdesk/antidetect')) {
+  projectRoot = '/home/zdna/Projects/cloakdesk'
+}
+
 const pythonBin = path.join(projectRoot, 'venv', 'bin', 'python')
 const iconPath = path.join(projectRoot, 'assets', 'cloakdesk-logo.png')
 
 let backendProcess = null
 let mainWindow = null
+
+// Cegah instance ganda saling bentrok
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  app.quit()
+  process.exit(0)
+}
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
+})
 
 function checkBackend(callback) {
   const req = http.get('http://127.0.0.1:53200/health', (res) => {
@@ -30,10 +50,14 @@ function ensureBackend(callback) {
     if (running) {
       return callback()
     }
-    const py = require('fs').existsSync(pythonBin) ? pythonBin : '/usr/bin/python3'
+    const py = fs.existsSync(pythonBin) ? pythonBin : '/usr/bin/python3'
     backendProcess = spawn(py, ['-m', 'antidetect', 'serve'], {
       cwd: projectRoot,
-      env: { ...process.env, DISPLAY: process.env.DISPLAY || ':0' },
+      env: {
+        ...process.env,
+        PYTHONPATH: `${projectRoot}:${process.env.PYTHONPATH || ''}`,
+        DISPLAY: process.env.DISPLAY || ':0',
+      },
       stdio: 'ignore',
       detached: false,
     })
