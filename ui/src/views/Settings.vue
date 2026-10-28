@@ -199,7 +199,12 @@ function applyLocalTheme(mode) {
   localThemeMode.value = next
   localStorage.setItem(THEME_STORAGE_KEY, next)
   const dark = next === 'dark' || (next === 'auto' && (mediaQuery ? mediaQuery.matches : false))
+  document.documentElement.classList.add('theme-transitioning')
   document.documentElement.classList.toggle('dark', dark)
+  void document.documentElement.offsetHeight
+  requestAnimationFrame(() => {
+    document.documentElement.classList.remove('theme-transitioning')
+  })
 }
 
 function updateThemeMode(mode) {

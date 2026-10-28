@@ -97,6 +97,13 @@ html.dark {
   --el-mask-color: rgba(15, 19, 26, 0.78);
 }
 
+.theme-transitioning,
+.theme-transitioning *,
+.theme-transitioning *::before,
+.theme-transitioning *::after {
+  transition: none !important;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -691,13 +698,16 @@ button {
   font-size: 13px;
   font-weight: 600;
   color: var(--ix-text-secondary);
+  transition: none !important;
 }
 
 .profiles-table td.el-table__cell,
 .data-table td.el-table__cell {
   height: 62px;
   padding: 0;
+  background: var(--ix-surface);
   border-bottom: 1px solid var(--ix-border-light);
+  transition: none !important;
 }
 
 .data-table td.el-table__cell {
@@ -734,6 +744,7 @@ button {
 .profiles-table .el-table-fixed-column--right,
 .data-table .el-table-fixed-column--right {
   background: var(--ix-surface);
+  transition: none !important;
 }
 
 .profiles-table .el-table__row:hover .el-table-fixed-column--right,
@@ -2662,6 +2673,7 @@ html.dark .group-manager .group-table th.el-table__cell {
   background: #141923;
   border-bottom-color: var(--ix-border);
   color: var(--ix-text-secondary);
+  transition: none !important;
 }
 
 html.dark .profiles-table td.el-table__cell,
@@ -2669,6 +2681,7 @@ html.dark .data-table td.el-table__cell,
 html.dark .group-manager .group-table td.el-table__cell {
   background: var(--ix-surface);
   border-bottom-color: var(--ix-border-light);
+  transition: none !important;
 }
 
 html.dark .profiles-table .el-table__row:hover > td.el-table__cell,

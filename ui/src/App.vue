@@ -38,7 +38,13 @@ const isDark = computed(
 )
 
 function syncDocumentTheme() {
+  if (typeof document === 'undefined') return
+  document.documentElement.classList.add('theme-transitioning')
   document.documentElement.classList.toggle('dark', isDark.value)
+  void document.documentElement.offsetHeight
+  requestAnimationFrame(() => {
+    document.documentElement.classList.remove('theme-transitioning')
+  })
 }
 
 function setThemeMode(mode, notify = true) {
