@@ -6,6 +6,14 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
 
+# 0. Jika dipanggil dengan argumen subperintah CLI (misal: cloakdesk sync, cloakdesk list)
+if [ "$#" -gt 0 ]; then
+    PY="/usr/bin/python3"
+    [ -x "$PYTHON_BIN" ] && PY="$PYTHON_BIN"
+    export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
+    exec "$PY" -m antidetect "$@"
+fi
+
 # 1. Pastikan backend CloakDesk aktif di port 53200
 if ! curl -s -m 1 http://127.0.0.1:53200/health >/dev/null 2>&1; then
     PY="/usr/bin/python3"
