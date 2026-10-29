@@ -2173,6 +2173,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(host="127.0.0.1", port=53200):
     store.init()
+    store.open_wal_anchor()
     sync_agent.start_heartbeat()
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"antidetect API listening on http://{host}:{port}/api/v2/")
@@ -2180,3 +2181,4 @@ def serve(host="127.0.0.1", port=53200):
         httpd.serve_forever()
     finally:
         sync_agent.stop_heartbeat()
+        store.close_wal_anchor()

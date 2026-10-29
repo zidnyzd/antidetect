@@ -181,16 +181,66 @@ def _conn_db_path(conn):
 
 
 class _Connection(sqlite3.Connection):
-    pass
+    _db_path: Path | None = None
+    _sync_schema_ready: bool = False
+
+
+_SCHEMA_CACHE_LOCK = threading.Lock()
+_VERIFIED_SCHEMA_KEYS = {}
+_wal_anchor = None
+
+
+def _db_stat_key(db_file):
+    try:
+        path = Path(db_file).resolve()
+        st = path.stat()
+        if st.st_size >= 16384:
+            return (str(path), st.st_dev, st.st_ino)
+    except Exception:
+        pass
+    return None
+
+
+def open_wal_anchor(db_path=None):
+    global _wal_anchor
+    close_wal_anchor()
+    try:
+        target = _resolve_db_path(db_path)
+        conn = sqlite3.connect(target, timeout=10.0, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+        _wal_anchor = conn
+    except Exception:
+        _wal_anchor = None
+
+
+def close_wal_anchor():
+    global _wal_anchor
+    conn = _wal_anchor
+    _wal_anchor = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def connect(db_path=None):
     target = _resolve_db_path(db_path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    resolved = Path(target).resolve()
+    stat_key = _db_stat_key(resolved)
+    with _SCHEMA_CACHE_LOCK:
+        schema_verified = (
+            stat_key is not None and _VERIFIED_SCHEMA_KEYS.get(stat_key[0]) == stat_key
+        )
     conn = sqlite3.connect(target, timeout=10.0, factory=_Connection)
     conn.row_factory = sqlite3.Row
-    conn._db_path = Path(target).resolve()
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn._db_path = resolved
+    if schema_verified:
+        conn._sync_schema_ready = True
+    else:
+        conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
@@ -291,21 +341,6 @@ def _load_local_crypto(conn):
     except Exception:
         pass
     return None, None
-
-
-_SCHEMA_CACHE_LOCK = threading.Lock()
-_VERIFIED_SCHEMA_KEYS = {}
-
-
-def _db_stat_key(db_file):
-    try:
-        path = Path(db_file).resolve()
-        st = path.stat()
-        if st.st_size > 0:
-            return (str(path), st.st_ino, st.st_ctime_ns)
-    except Exception:
-        pass
-    return None
 
 
 def _ensure_sync_schema(conn):
