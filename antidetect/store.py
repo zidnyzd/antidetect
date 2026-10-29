@@ -8,6 +8,7 @@ import secrets
 import shutil
 import socket
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -154,23 +155,44 @@ def _resolve_db_path(db_path=None):
 
 
 def _conn_db_path(conn):
+    cached = getattr(conn, "_db_path", None)
+    if cached is not None:
+        return cached
     try:
         rows = conn.execute("PRAGMA database_list").fetchall()
         for row in rows:
             name = row[1] if isinstance(row, tuple) else row["name"]
             file_path = row[2] if isinstance(row, tuple) else row["file"]
             if name == "main" and file_path:
-                return Path(file_path)
+                resolved = Path(file_path).resolve()
+                try:
+                    conn._db_path = resolved
+                except Exception:
+                    pass
+                return resolved
     except Exception:
         pass
-    return _resolve_db_path()
+    fallback = _resolve_db_path().resolve()
+    try:
+        conn._db_path = fallback
+    except Exception:
+        pass
+    return fallback
+
+
+class _Connection(sqlite3.Connection):
+    pass
 
 
 def connect(db_path=None):
     target = _resolve_db_path(db_path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(target)
+    conn = sqlite3.connect(target, timeout=10.0, factory=_Connection)
     conn.row_factory = sqlite3.Row
+    conn._db_path = Path(target).resolve()
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -271,11 +293,40 @@ def _load_local_crypto(conn):
     return None, None
 
 
+_SCHEMA_CACHE_LOCK = threading.Lock()
+_VERIFIED_SCHEMA_KEYS = {}
+
+
+def _db_stat_key(db_file):
+    try:
+        path = Path(db_file).resolve()
+        st = path.stat()
+        if st.st_size > 0:
+            return (str(path), st.st_ino, st.st_ctime_ns)
+    except Exception:
+        pass
+    return None
+
+
 def _ensure_sync_schema(conn):
+    if getattr(conn, "_sync_schema_ready", False):
+        return
+
+    db_file = _conn_db_path(conn)
+    stat_key = _db_stat_key(db_file)
+    if stat_key is not None:
+        with _SCHEMA_CACHE_LOCK:
+            cached_key = _VERIFIED_SCHEMA_KEYS.get(stat_key[0])
+        if cached_key == stat_key:
+            try:
+                conn._sync_schema_ready = True
+            except Exception:
+                pass
+            return
+
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(profiles)")}
     if "uuid" not in columns:
         conn.commit()
-        db_file = _conn_db_path(conn)
         if db_file.is_file():
             ts_bak = time.strftime("%Y%m%d-%H%M%S")
             bak_path = db_file.parent / f"{db_file.name}.pre-sync-{ts_bak}.bak"
@@ -339,6 +390,15 @@ def _ensure_sync_schema(conn):
         set_sync_state(conn, "device_name", socket.gethostname() or "Device")
     if get_sync_state(conn, "last_pulled_seq") is None:
         set_sync_state(conn, "last_pulled_seq", "0")
+
+    stat_key = _db_stat_key(db_file)
+    if stat_key is not None:
+        with _SCHEMA_CACHE_LOCK:
+            _VERIFIED_SCHEMA_KEYS[stat_key[0]] = stat_key
+    try:
+        conn._sync_schema_ready = True
+    except Exception:
+        pass
 
 
 def _backfill_uuids(conn):
@@ -426,9 +486,29 @@ def init(db_path=None):
                 "INSERT INTO groups (title, sort, created_at) VALUES ('Default', 0, ?)",
                 (now(),),
             )
+        resolved_path = str(_conn_db_path(conn).resolve())
+        with _SCHEMA_CACHE_LOCK:
+            _VERIFIED_SCHEMA_KEYS.pop(resolved_path, None)
+        try:
+            conn._sync_schema_ready = False
+        except Exception:
+            pass
         _ensure_sync_schema(conn)
         _backfill_uuids(conn)
         conn.commit()
+        db_file = _conn_db_path(conn)
+        stat_key = _db_stat_key(db_file)
+        if stat_key is not None:
+            with _SCHEMA_CACHE_LOCK:
+                _VERIFIED_SCHEMA_KEYS[stat_key[0]] = stat_key
+            try:
+                conn._sync_schema_ready = True
+            except Exception:
+                pass
+    stat_key = _db_stat_key(db_file)
+    if stat_key is not None:
+        with _SCHEMA_CACHE_LOCK:
+            _VERIFIED_SCHEMA_KEYS[stat_key[0]] = stat_key
 
 
 def _loads(value):

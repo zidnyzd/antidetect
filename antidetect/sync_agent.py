@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -552,15 +553,20 @@ def get_status(conn=None, db_path=None):
 
     store._ensure_sync_schema(conn)
     creds = load_credentials(conn=conn, db_path=db_path)
+    try:
+        state_rows = conn.execute("SELECT key, value FROM sync_state").fetchall()
+        state_map = {row["key"]: row["value"] for row in state_rows}
+    except sqlite3.OperationalError:
+        state_map = {}
     outbox_count = conn.execute("SELECT COUNT(*) AS c FROM sync_outbox").fetchone()["c"]
-    device_id = creds.get("device_id") or store.get_sync_state(conn, "device_id") or ""
-    device_name = creds.get("device_name") or store.get_sync_state(conn, "device_name") or ""
-    server_url = creds.get("server_url") or store.get_sync_state(conn, "server_url") or ""
-    last_pulled_seq = int(store.get_sync_state(conn, "last_pulled_seq", "0") or 0)
-    last_sync_at = store.get_sync_state(conn, "last_sync_at") or None
-    last_sync_error = store.get_sync_state(conn, "last_sync_error") or None
+    device_id = creds.get("device_id") or state_map.get("device_id") or ""
+    device_name = creds.get("device_name") or state_map.get("device_name") or ""
+    server_url = creds.get("server_url") or state_map.get("server_url") or ""
+    last_pulled_seq = int(state_map.get("last_pulled_seq", "0") or 0)
+    last_sync_at = state_map.get("last_sync_at") or None
+    last_sync_error = state_map.get("last_sync_error") or None
     return {
-        "configured": bool(server_url and (creds.get("device_token") or store.get_sync_state(conn, "device_token"))),
+        "configured": bool(server_url and (creds.get("device_token") or state_map.get("device_token"))),
         "device_id": device_id,
         "device_name": device_name,
         "server_url": server_url,
